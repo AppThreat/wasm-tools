@@ -67,7 +67,12 @@ def test_parse_wasm_file_includes_security_analysis_summary():
 
     assert "analysis" in report
     assert report["analysis"]["summary"]["risk_score"] >= 0
-    assert report["analysis"]["summary"]["risk_tier"] in {"none", "low", "medium", "high"}
+    assert report["analysis"]["summary"]["risk_tier"] in {
+        "none",
+        "low",
+        "medium",
+        "high",
+    }
     assert isinstance(report["analysis"]["findings"], list)
 
 
@@ -124,4 +129,3 @@ def test_parse_wasm_file_json_handles_read_errors(tmp_path):
     assert parsed["file"] == str(missing)
     assert parsed["errors"]
     assert parsed["function_count"] == 0
-

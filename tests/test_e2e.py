@@ -242,5 +242,3 @@ def test_e2e_bulk_memory_fixture(capsys):
     assert "memory.init 0 0" in stdout
     assert "data.drop 0" in stdout
     assert "memory.fill 0" in stdout
-
-

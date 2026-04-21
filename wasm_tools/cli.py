@@ -37,8 +37,16 @@ def main() -> None:
         action="store_true",
         help="Print a minified JSON report to stdout",
     )
+    parser.add_argument(
+        "--analysis-only",
+        action="store_true",
+        help="With --json and/or --json-out, emit only the analysis object",
+    )
 
     args = parser.parse_args()
+
+    if args.analysis_only and not (args.json or args.json_out):
+        parser.error("--analysis-only requires --json and/or --json-out")
 
     options = ObjdumpOptions()
     options.filename = args.file
@@ -54,7 +62,8 @@ def main() -> None:
 
     if args.json or args.json_out:
         report = parse_wasm_bytes(data, filename=args.file)
-        payload = json.dumps(report, ensure_ascii=False, separators=(",", ":"))
+        output = report["analysis"] if args.analysis_only else report
+        payload = json.dumps(output, ensure_ascii=False, separators=(",", ":"))
         if args.json:
             print(payload)
         try:

@@ -79,12 +79,21 @@ Use to persist machine-readable output:
 
 When both `--json` and `--json-out PATH` are provided, the CLI prints JSON to stdout and writes the same payload to file.
 
+### `--analysis-only`
+
+Use with `--json` and/or `--json-out` when you want only the high-level triage layer:
+
+- emits the `analysis` object instead of the full decode report,
+- best for policy engines, SOC triage, and compact evidence capture,
+- invalid on its own and must be paired with `--json` or `--json-out`.
+
 ## Security-focused usage patterns
 
 1. Start with `--headers` to understand attack surface quickly.
 2. Use `-x` to inspect imports/exports and memory/table capabilities.
 3. Use `-d` for suspicious functions or proposal-heavy modules.
 4. Use `--json` or `--json-out` for reproducible evidence capture.
+5. Use `--analysis-only` when the full decode is too verbose for the immediate review task.
 
 ## Output semantics that matter
 
@@ -99,7 +108,9 @@ wasm-tools sample.wasm --headers
 wasm-tools sample.wasm -x
 wasm-tools sample.wasm -d
 wasm-tools sample.wasm --json
+wasm-tools sample.wasm --json --analysis-only
 wasm-tools sample.wasm --json-out sample.json
+wasm-tools sample.wasm --json-out analysis.json --analysis-only
 wasm-tools sample.wasm --json --json-out sample.json
 ```
 

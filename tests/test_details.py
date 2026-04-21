@@ -31,6 +31,7 @@ def _run_details(data: bytes) -> str:
 
 # ─── banner ───────────────────────────────────────────────────────────────────
 
+
 def test_details_banner_empty_module(capsys):
     """Details mode prints the 'Section Details:' header."""
     data = b"\x00asm\x01\x00\x00\x00"
@@ -39,6 +40,7 @@ def test_details_banner_empty_module(capsys):
 
 
 # ─── type section ─────────────────────────────────────────────────────────────
+
 
 def test_details_type_section_simple_add(capsys):
     data = _fixture("simple_add.wasm")
@@ -52,6 +54,7 @@ def test_details_type_section_simple_add(capsys):
 
 # ─── export section ───────────────────────────────────────────────────────────
 
+
 def test_details_export_section(capsys):
     data = _fixture("simple_add.wasm")
     _run_details(data)
@@ -63,6 +66,7 @@ def test_details_export_section(capsys):
 
 # ─── memory section ───────────────────────────────────────────────────────────
 
+
 def test_details_memory_section(capsys):
     data = _fixture("bulk_memory.wasm")
     _run_details(data)
@@ -72,6 +76,7 @@ def test_details_memory_section(capsys):
 
 
 # ─── data section ─────────────────────────────────────────────────────────────
+
 
 def test_details_data_section(capsys):
     # bulk_memory.wasm has a passive data segment (no memory binding)
@@ -84,6 +89,7 @@ def test_details_data_section(capsys):
 
 
 # ─── import section ───────────────────────────────────────────────────────────
+
 
 def test_details_import_section(capsys):
     data = _fixture("globals_imports.wasm")
@@ -98,6 +104,7 @@ def test_details_import_section(capsys):
 
 # ─── function + code sections ─────────────────────────────────────────────────
 
+
 def test_details_function_and_code_sections(capsys):
     data = _fixture("simple_add.wasm")
     _run_details(data)
@@ -109,6 +116,7 @@ def test_details_function_and_code_sections(capsys):
 
 # ─── global section ───────────────────────────────────────────────────────────
 
+
 def test_details_global_section(capsys):
     data = _fixture("globals_imports.wasm")
     _run_details(data)
@@ -118,6 +126,7 @@ def test_details_global_section(capsys):
 
 
 # ─── element + table sections ─────────────────────────────────────────────────
+
 
 def test_details_element_and_table_sections(capsys):
     data = _fixture("call_indirect.wasm")
@@ -129,9 +138,11 @@ def test_details_element_and_table_sections(capsys):
 
 # ─── CLI integration ─────────────────────────────────────────────────────────
 
+
 def test_cli_details_flag(monkeypatch, capsys, tmp_path):
     """'-x' flag routes through BinaryReaderObjdumpDetails."""
     import shutil
+
     src = os.path.join(FIXTURES_DIR, "simple_add.wasm")
     dst = tmp_path / "simple_add.wasm"
     shutil.copy(src, dst)
@@ -146,6 +157,7 @@ def test_cli_details_flag(monkeypatch, capsys, tmp_path):
 def test_cli_details_default_mode(monkeypatch, capsys, tmp_path):
     """Running without a flag defaults to details mode."""
     import shutil
+
     src = os.path.join(FIXTURES_DIR, "simple_add.wasm")
     dst = tmp_path / "simple_add.wasm"
     shutil.copy(src, dst)
@@ -176,7 +188,9 @@ def test_cli_json_out_writes_minified_report(monkeypatch, capsys, tmp_path):
     out_path = tmp_path / "simple_add.json"
     shutil.copy(src, wasm_path)
 
-    monkeypatch.setattr("sys.argv", ["wasm-tools", str(wasm_path), "--json-out", str(out_path)])
+    monkeypatch.setattr(
+        "sys.argv", ["wasm-tools", str(wasm_path), "--json-out", str(out_path)]
+    )
     cli.main()
 
     stdout = capsys.readouterr().out
@@ -229,6 +243,101 @@ def test_cli_json_and_json_out_emit_both(monkeypatch, capsys, tmp_path):
     assert parsed_stdout == parsed_file
 
 
+def test_cli_json_analysis_only_prints_analysis_object(monkeypatch, capsys, tmp_path):
+    import shutil
+
+    src = os.path.join(FIXTURES_DIR, "wasi_capabilities.wasm")
+    wasm_path = tmp_path / "wasi_capabilities.wasm"
+    shutil.copy(src, wasm_path)
+
+    monkeypatch.setattr(
+        "sys.argv",
+        ["wasm-tools", str(wasm_path), "--json", "--analysis-only"],
+    )
+    cli.main()
+
+    stdout = capsys.readouterr().out.strip()
+    parsed = json.loads(stdout)
+    assert "summary" in parsed
+    assert "findings" in parsed
+    assert "capabilities" in parsed
+    assert "file" not in parsed
+    assert any(f["id"] == "WASM-CAP-001" for f in parsed["findings"])
+
+
+def test_cli_json_analysis_only_can_write_file(monkeypatch, capsys, tmp_path):
+    import shutil
+
+    src = os.path.join(FIXTURES_DIR, "dos_growth_loop.wasm")
+    wasm_path = tmp_path / "dos_growth_loop.wasm"
+    out_path = tmp_path / "analysis.json"
+    shutil.copy(src, wasm_path)
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "wasm-tools",
+            str(wasm_path),
+            "--json-out",
+            str(out_path),
+            "--analysis-only",
+        ],
+    )
+    cli.main()
+
+    stdout = capsys.readouterr().out
+    assert stdout == ""
+    parsed = json.loads(out_path.read_text(encoding="utf-8"))
+    assert "summary" in parsed
+    assert "profiles" in parsed
+    assert "functions" not in parsed
+    assert any(f["id"] == "WASM-DOS-003" for f in parsed["findings"])
+
+
+def test_cli_json_analysis_only_and_json_out_emit_same_payload(
+    monkeypatch, capsys, tmp_path
+):
+    import shutil
+
+    src = os.path.join(FIXTURES_DIR, "wasi_capabilities.wasm")
+    wasm_path = tmp_path / "wasi_capabilities.wasm"
+    out_path = tmp_path / "analysis.json"
+    shutil.copy(src, wasm_path)
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "wasm-tools",
+            str(wasm_path),
+            "--json",
+            "--json-out",
+            str(out_path),
+            "--analysis-only",
+        ],
+    )
+    cli.main()
+
+    stdout = capsys.readouterr().out.strip()
+    parsed_stdout = json.loads(stdout)
+    parsed_file = json.loads(out_path.read_text(encoding="utf-8"))
+    assert parsed_stdout == parsed_file
+
+
+def test_cli_analysis_only_without_json_mode_exits(monkeypatch, capsys, tmp_path):
+    import shutil
+
+    src = os.path.join(FIXTURES_DIR, "simple_add.wasm")
+    wasm_path = tmp_path / "simple_add.wasm"
+    shutil.copy(src, wasm_path)
+
+    monkeypatch.setattr("sys.argv", ["wasm-tools", str(wasm_path), "--analysis-only"])
+    with pytest.raises(SystemExit):
+        cli.main()
+
+    stderr = capsys.readouterr().err
+    assert "--analysis-only requires --json and/or --json-out" in stderr
+
+
 def test_cli_json_out_write_error_exits(monkeypatch, capsys, tmp_path):
     import shutil
 
@@ -237,7 +346,9 @@ def test_cli_json_out_write_error_exits(monkeypatch, capsys, tmp_path):
     shutil.copy(src, wasm_path)
 
     # Writing to a directory path should fail with a clear CLI error.
-    monkeypatch.setattr("sys.argv", ["wasm-tools", str(wasm_path), "--json-out", str(tmp_path)])
+    monkeypatch.setattr(
+        "sys.argv", ["wasm-tools", str(wasm_path), "--json-out", str(tmp_path)]
+    )
     with pytest.raises(SystemExit):
         cli.main()
 
@@ -254,6 +365,7 @@ def test_details_datacount_section_includes_count(capsys):
 
 
 # ─── ObjdumpState richness ────────────────────────────────────────────────────
+
 
 def test_prepass_populates_types():
     data = _fixture("simple_add.wasm")
@@ -306,6 +418,7 @@ def test_prepass_populates_globals():
 
 def test_api_report_includes_rich_sections():
     from wasm_tools.api import parse_wasm_file
+
     report = parse_wasm_file(os.path.join(FIXTURES_DIR, "simple_add.wasm"))
     assert report["types"]
     assert report["types"][0]["params"] == ["i32", "i32"]
@@ -316,6 +429,7 @@ def test_api_report_includes_rich_sections():
 
 def test_api_report_bulk_memory_data_segments():
     from wasm_tools.api import parse_wasm_file
+
     report = parse_wasm_file(os.path.join(FIXTURES_DIR, "bulk_memory.wasm"))
     assert report["data_segments"]
     seg = report["data_segments"][0]
@@ -324,10 +438,7 @@ def test_api_report_bulk_memory_data_segments():
 
 def test_api_report_memories():
     from wasm_tools.api import parse_wasm_file
+
     report = parse_wasm_file(os.path.join(FIXTURES_DIR, "bulk_memory.wasm"))
     assert report["memories"]
     assert report["memories"][0]["limits"]["min"] == 1
-
-
-
-

@@ -151,6 +151,7 @@ Current CLI flags in `wasm_tools/cli.py`:
 - `-d`, `--disassemble` — decode and print function body instructions
 - `--json` — print a minified JSON report to stdout
 - `--json-out PATH` — write a minified JSON report to `PATH`
+- `--analysis-only` — with `--json` and/or `--json-out`, emit only the high-level `analysis` object
 
 With no flags, `--details` is the default.
 
@@ -172,10 +173,22 @@ Print a minified JSON report to stdout:
 wasm-tools tests/fixtures/simple_add.wasm --json
 ```
 
+Print only the high-level analysis object to stdout:
+
+```bash
+wasm-tools tests/fixtures/wasi_capabilities.wasm --json --analysis-only
+```
+
 Use both JSON options together to write a file and print the same payload:
 
 ```bash
 wasm-tools tests/fixtures/simple_add.wasm --json --json-out simple_add.json
+```
+
+Write only the analysis object to a file:
+
+```bash
+wasm-tools tests/fixtures/dos_growth_loop.wasm --json-out analysis.json --analysis-only
 ```
 
 ## Library usage

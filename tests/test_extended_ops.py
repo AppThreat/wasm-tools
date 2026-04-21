@@ -9,7 +9,10 @@ import pytest
 from wasm_tools.models import ObjdumpMode, ObjdumpOptions, ObjdumpState
 from wasm_tools.opcodes import OPCODES, ImmType
 from wasm_tools.parser import BinaryReader
-from wasm_tools.visitor import BinaryReaderObjdumpDisassemble, BinaryReaderObjdumpPrepass
+from wasm_tools.visitor import (
+    BinaryReaderObjdumpDisassemble,
+    BinaryReaderObjdumpPrepass,
+)
 
 FIXTURES_DIR = os.path.join(os.path.dirname(__file__), "fixtures")
 
@@ -29,19 +32,29 @@ def _disassemble(data: bytes) -> str:
     options.mode = ObjdumpMode.DISASSEMBLE
     import io
     from contextlib import redirect_stdout
+
     buf = io.StringIO()
     with redirect_stdout(buf):
-        BinaryReader(data, BinaryReaderObjdumpDisassemble(data, options, state)).read_module()
+        BinaryReader(
+            data, BinaryReaderObjdumpDisassemble(data, options, state)
+        ).read_module()
     return buf.getvalue()
 
 
 # ─── Opcode table completeness ────────────────────────────────────────────────
 
+
 def test_core_i32_arithmetic_in_table():
     for code, name in [
-        (0x6A, "i32.add"), (0x6B, "i32.sub"), (0x6C, "i32.mul"),
-        (0x67, "i32.clz"), (0x68, "i32.ctz"), (0x69, "i32.popcnt"),
-        (0x74, "i32.shl"), (0x75, "i32.shr_s"), (0x76, "i32.shr_u"),
+        (0x6A, "i32.add"),
+        (0x6B, "i32.sub"),
+        (0x6C, "i32.mul"),
+        (0x67, "i32.clz"),
+        (0x68, "i32.ctz"),
+        (0x69, "i32.popcnt"),
+        (0x74, "i32.shl"),
+        (0x75, "i32.shr_s"),
+        (0x76, "i32.shr_u"),
     ]:
         assert (0, code) in OPCODES, f"Missing (0, {code:#x}) = {name}"
         assert OPCODES[(0, code)][0] == name
@@ -49,8 +62,12 @@ def test_core_i32_arithmetic_in_table():
 
 def test_core_i64_arithmetic_in_table():
     for code, name in [
-        (0x7C, "i64.add"), (0x7D, "i64.sub"), (0x7E, "i64.mul"),
-        (0x86, "i64.shl"), (0x87, "i64.shr_s"), (0x88, "i64.shr_u"),
+        (0x7C, "i64.add"),
+        (0x7D, "i64.sub"),
+        (0x7E, "i64.mul"),
+        (0x86, "i64.shl"),
+        (0x87, "i64.shr_s"),
+        (0x88, "i64.shr_u"),
     ]:
         assert (0, code) in OPCODES, f"Missing (0, {code:#x}) = {name}"
         assert OPCODES[(0, code)][0] == name
@@ -58,16 +75,25 @@ def test_core_i64_arithmetic_in_table():
 
 def test_core_f32_f64_arithmetic_in_table():
     for code, name in [
-        (0x92, "f32.add"), (0x93, "f32.sub"), (0x94, "f32.mul"), (0x95, "f32.div"),
-        (0xA0, "f64.add"), (0xA1, "f64.sub"), (0xA2, "f64.mul"), (0xA3, "f64.div"),
+        (0x92, "f32.add"),
+        (0x93, "f32.sub"),
+        (0x94, "f32.mul"),
+        (0x95, "f32.div"),
+        (0xA0, "f64.add"),
+        (0xA1, "f64.sub"),
+        (0xA2, "f64.mul"),
+        (0xA3, "f64.div"),
     ]:
         assert (0, code) in OPCODES, f"Missing (0, {code:#x}) = {name}"
 
 
 def test_sign_extension_in_table():
     for code, name in [
-        (0xC0, "i32.extend8_s"), (0xC1, "i32.extend16_s"),
-        (0xC2, "i64.extend8_s"), (0xC3, "i64.extend16_s"), (0xC4, "i64.extend32_s"),
+        (0xC0, "i32.extend8_s"),
+        (0xC1, "i32.extend16_s"),
+        (0xC2, "i64.extend8_s"),
+        (0xC3, "i64.extend16_s"),
+        (0xC4, "i64.extend32_s"),
     ]:
         assert (0, code) in OPCODES
         assert OPCODES[(0, code)][0] == name
@@ -81,7 +107,7 @@ def test_conversions_in_table():
 
 
 def test_reference_types_in_table():
-    assert OPCODES[(0, 0xD0)][1] == ImmType.HEAP_TYPE   # ref.null
+    assert OPCODES[(0, 0xD0)][1] == ImmType.HEAP_TYPE  # ref.null
     assert OPCODES[(0, 0xD1)][0] == "ref.is_null"
     assert OPCODES[(0, 0xD2)][0] == "ref.func"
     assert OPCODES[(0, 0xD3)][0] == "ref.eq"
@@ -90,12 +116,18 @@ def test_reference_types_in_table():
 
 
 def test_saturating_trunc_in_table():
-    for i, name in enumerate([
-        "i32.trunc_sat_f32_s", "i32.trunc_sat_f32_u",
-        "i32.trunc_sat_f64_s", "i32.trunc_sat_f64_u",
-        "i64.trunc_sat_f32_s", "i64.trunc_sat_f32_u",
-        "i64.trunc_sat_f64_s", "i64.trunc_sat_f64_u",
-    ]):
+    for i, name in enumerate(
+        [
+            "i32.trunc_sat_f32_s",
+            "i32.trunc_sat_f32_u",
+            "i32.trunc_sat_f64_s",
+            "i32.trunc_sat_f64_u",
+            "i64.trunc_sat_f32_s",
+            "i64.trunc_sat_f32_u",
+            "i64.trunc_sat_f64_s",
+            "i64.trunc_sat_f64_u",
+        ]
+    ):
         assert (0xFC, i) in OPCODES
         assert OPCODES[(0xFC, i)][0] == name
 
@@ -169,6 +201,7 @@ def test_threads_memarg_ops_in_table():
 
 # ─── ImmType dispatch (synthetic modules) ────────────────────────────────────
 
+
 def _leb(v: int) -> bytes:
     """Encode unsigned LEB128."""
     out = []
@@ -194,7 +227,15 @@ def _make_module(body: bytes) -> bytes:
 
 def test_dispatch_br_table(capsys):
     # br_table with 2 targets + default
-    body = bytes([0x00]) + bytes([0x0E]) + _leb(2) + _leb(0) + _leb(1) + _leb(0) + bytes([0x0B])
+    body = (
+        bytes([0x00])
+        + bytes([0x0E])
+        + _leb(2)
+        + _leb(0)
+        + _leb(1)
+        + _leb(0)
+        + bytes([0x0B])
+    )
     out = _disassemble(_make_module(body))
     assert "br_table" in out
 
@@ -271,6 +312,7 @@ def test_dispatch_throw(capsys):
 
 # ─── Fixture-based tests ──────────────────────────────────────────────────────
 
+
 def test_simd_basic_fixture_disassembly(capsys):
     data = _fixture("simd_basic.wasm")
     out = _disassemble(data)
@@ -287,4 +329,3 @@ def test_threads_basic_fixture_disassembly(capsys):
     data = _fixture("threads_basic.wasm")
     out = _disassemble(data)
     assert "atomic" in out
-

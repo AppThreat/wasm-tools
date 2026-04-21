@@ -123,13 +123,13 @@ class BinaryReader:
     def read_string(self) -> str:
         length = self.read_leb128(max_bits=32)
         self._ensure(length)
-        s_bytes = self.data[self.offset: self.offset + length]
+        s_bytes = self.data[self.offset : self.offset + length]
         self.offset += length
         return s_bytes.decode("utf-8", errors="replace")
 
     def read_bytes(self, n: int) -> bytes:
         self._ensure(n)
-        b = self.data[self.offset: self.offset + n]
+        b = self.data[self.offset : self.offset + n]
         self.offset += n
         return b
 
@@ -286,7 +286,9 @@ class BinaryReader:
             self.offset = end_offset
             section_index += 1
 
-    def _decode_section(self, section_index: int, section_id: int, end_offset: int) -> None:
+    def _decode_section(
+        self, section_index: int, section_id: int, end_offset: int
+    ) -> None:
         if section_id == BinarySection.CUSTOM:
             self._decode_custom(section_index, end_offset)
         elif section_id == BinarySection.TYPE:
@@ -320,7 +322,9 @@ class BinaryReader:
 
     def _decode_custom(self, section_index: int, end_offset: int) -> None:
         name = self.read_string()
-        self.delegate.begin_custom_section(section_index, end_offset - self.offset, name)
+        self.delegate.begin_custom_section(
+            section_index, end_offset - self.offset, name
+        )
         if name == "name":
             while self.offset < end_offset:
                 sub_id = self.read_u8()
@@ -399,7 +403,9 @@ class BinaryReader:
             module = self.read_string()
             name = self.read_string()
             kind_byte = self.read_u8()
-            kind = {0: "func", 1: "table", 2: "memory", 3: "global", 4: "tag"}.get(kind_byte, "unknown")
+            kind = {0: "func", 1: "table", 2: "memory", 3: "global", 4: "tag"}.get(
+                kind_byte, "unknown"
+            )
             extra: dict = {}
             if kind_byte == 0:
                 extra["type_index"] = self.read_leb128(max_bits=32)
@@ -457,7 +463,9 @@ class BinaryReader:
             ref_type = self.read_reftype()
             mn, mx, is64 = self.read_limits()
             if hasattr(self.delegate, "on_table"):
-                self.delegate.on_table(self.imported_table_count + i, ref_type, mn, mx, is64)
+                self.delegate.on_table(
+                    self.imported_table_count + i, ref_type, mn, mx, is64
+                )
 
     def _decode_memory(self, end_offset: int) -> None:
         count = self.read_leb128(max_bits=32)
@@ -472,14 +480,18 @@ class BinaryReader:
             vt, mut = self.read_globaltype()
             init_expr = self.read_init_expr()
             if hasattr(self.delegate, "on_global"):
-                self.delegate.on_global(self.imported_global_count + i, vt, mut, init_expr)
+                self.delegate.on_global(
+                    self.imported_global_count + i, vt, mut, init_expr
+                )
 
     def _decode_export(self, end_offset: int) -> None:
         count = self.read_leb128(max_bits=32)
         for i in range(count):
             name = self.read_string()
             kind_byte = self.read_u8()
-            kind = {0: "func", 1: "table", 2: "memory", 3: "global", 4: "tag"}.get(kind_byte, "unknown")
+            kind = {0: "func", 1: "table", 2: "memory", 3: "global", 4: "tag"}.get(
+                kind_byte, "unknown"
+            )
             ref_index = self.read_leb128(max_bits=32)
             if hasattr(self.delegate, "on_export"):
                 self.delegate.on_export(i, name, kind, ref_index)
@@ -550,8 +562,13 @@ class BinaryReader:
 
             if hasattr(self.delegate, "on_element"):
                 self.delegate.on_element(
-                    i, mode, ref_type, table_idx, offset_expr,
-                    len(func_indices), func_indices
+                    i,
+                    mode,
+                    ref_type,
+                    table_idx,
+                    offset_expr,
+                    len(func_indices),
+                    func_indices,
                 )
 
     def _decode_code(self, end_offset: int) -> None:
@@ -570,7 +587,9 @@ class BinaryReader:
                 ltype = self.read_valtype()
                 locals_list.append((lcount, ltype))
                 if hasattr(self.delegate, "on_local_decl"):
-                    self.delegate.on_local_decl(func_idx, len(locals_list) - 1, lcount, ltype)
+                    self.delegate.on_local_decl(
+                        func_idx, len(locals_list) - 1, lcount, ltype
+                    )
 
             self.read_instructions(b_end)
             if hasattr(self.delegate, "end_function_body"):
@@ -803,4 +822,3 @@ class BinaryReader:
                 self.read_u8()  # reserved byte 0x00
                 if hasattr(self.delegate, "on_opcode_bare"):
                     self.delegate.on_opcode_bare()
-

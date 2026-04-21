@@ -148,4 +148,3 @@ def test_read_module_without_on_error_does_not_raise():
     data = b"\x01asm\x01\x00\x00\x00"
     reader = BinaryReader(data, NoErrorDelegate())
     reader.read_module()
-

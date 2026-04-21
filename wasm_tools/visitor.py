@@ -26,12 +26,16 @@ class BinaryReaderNop:
     def begin_section(self, section_index: int, section_code: int, size: int) -> None:
         pass
 
-    def begin_custom_section(self, section_index: int, size: int, section_name: str) -> None:
+    def begin_custom_section(
+        self, section_index: int, size: int, section_name: str
+    ) -> None:
         pass
 
 
 class BinaryReaderObjdumpBase(BinaryReaderNop):
-    def __init__(self, data: bytes, options: ObjdumpOptions, state: ObjdumpState) -> None:
+    def __init__(
+        self, data: bytes, options: ObjdumpOptions, state: ObjdumpState
+    ) -> None:
         self.options = options
         self.objdump_state = state
         self.offset = 0
@@ -64,7 +68,9 @@ class BinaryReaderObjdumpPrepass(BinaryReaderObjdumpBase):
                 section_code, "Unknown"
             )
 
-    def begin_custom_section(self, section_index: int, size: int, section_name: str) -> None:
+    def begin_custom_section(
+        self, section_index: int, size: int, section_name: str
+    ) -> None:
         self.objdump_state.section_names[section_index] = section_name
 
     def on_function_name(self, index: int, name: str) -> None:
@@ -80,7 +86,9 @@ class BinaryReaderObjdumpPrepass(BinaryReaderObjdumpBase):
             self.objdump_state.types.append(FuncType())
         self.objdump_state.types[index] = ft
 
-    def on_import(self, index: int, module: str, name: str, kind: str, **kwargs: Any) -> None:
+    def on_import(
+        self, index: int, module: str, name: str, kind: str, **kwargs: Any
+    ) -> None:
         if kind == "func":
             self.objdump_state.imported_function_count += 1
         elif kind == "table":
@@ -103,12 +111,16 @@ class BinaryReaderObjdumpPrepass(BinaryReaderObjdumpBase):
                 minimum=kwargs["limits_min"],
                 maximum=kwargs.get("limits_max"),
                 is_64=kwargs.get("limits_64", False),
-            ) if kind == "table" else None,
+            )
+            if kind == "table"
+            else None,
             mem_limits=Limits(
                 minimum=kwargs["limits_min"],
                 maximum=kwargs.get("limits_max"),
                 is_64=kwargs.get("limits_64", False),
-            ) if kind == "memory" else None,
+            )
+            if kind == "memory"
+            else None,
             global_valtype=kwargs.get("valtype"),
             global_mutable=kwargs.get("mutable", False),
             tag_type_index=kwargs.get("type_index") if kind == "tag" else None,
@@ -132,8 +144,12 @@ class BinaryReaderObjdumpPrepass(BinaryReaderObjdumpBase):
             self.objdump_state.memories.append(None)  # type: ignore
         self.objdump_state.memories[index] = entry
 
-    def on_global(self, index: int, valtype: str, mutable: bool, init_expr: str) -> None:
-        entry = GlobalEntry(index=index, valtype=valtype, mutable=mutable, init_expr=init_expr)
+    def on_global(
+        self, index: int, valtype: str, mutable: bool, init_expr: str
+    ) -> None:
+        entry = GlobalEntry(
+            index=index, valtype=valtype, mutable=mutable, init_expr=init_expr
+        )
         while len(self.objdump_state.globals) <= index:
             self.objdump_state.globals.append(None)  # type: ignore
         self.objdump_state.globals[index] = entry
@@ -171,7 +187,13 @@ class BinaryReaderObjdumpPrepass(BinaryReaderObjdumpBase):
         self.objdump_state.elements[index] = entry
 
     def on_data(
-        self, index: int, mode: str, mem_idx: int, offset_expr: str, size: int, data: bytes
+        self,
+        index: int,
+        mode: str,
+        mem_idx: int,
+        offset_expr: str,
+        size: int,
+        data: bytes,
     ) -> None:
         entry = DataEntry(
             index=index,
@@ -198,14 +220,16 @@ class BinaryReaderObjdumpPrepass(BinaryReaderObjdumpBase):
 class BinaryReaderObjdumpHeaders(BinaryReaderObjdumpBase):
     """Emit a section-header table (wasm-objdump -h style)."""
 
-    def __init__(self, data: bytes, options: ObjdumpOptions, state: ObjdumpState) -> None:
+    def __init__(
+        self, data: bytes, options: ObjdumpOptions, state: ObjdumpState
+    ) -> None:
         super().__init__(data, options, state)
         self._section_count = 0
 
     def begin_module(self, version: int) -> None:
         print("\nSections:\n")
         print(f"  {'id':>3} {'name':<16} {'size':>6}  {'offset'}")
-        print(f"  {'-'*3} {'-'*16} {'-'*6}  {'-'*8}")
+        print(f"  {'-' * 3} {'-' * 16} {'-' * 6}  {'-' * 8}")
 
     def begin_section(self, section_index: int, section_code: int, size: int) -> None:
         super().begin_section(section_index, section_code, size)
@@ -253,8 +277,10 @@ class BinaryReaderObjdumpDetails(BinaryReaderObjdumpBase):
             return self._count_non_none(state.tags)
         return 0
 
-    def begin_custom_section(self, section_index: int, size: int, section_name: str) -> None:
-        print(f"\nCustom[{section_index}] \"{section_name}\":")
+    def begin_custom_section(
+        self, section_index: int, size: int, section_name: str
+    ) -> None:
+        print(f'\nCustom[{section_index}] "{section_name}":')
 
     # ── type section ──────────────────────────────────────────────────────
 
@@ -265,7 +291,9 @@ class BinaryReaderObjdumpDetails(BinaryReaderObjdumpBase):
 
     # ── import section ────────────────────────────────────────────────────
 
-    def on_import(self, index: int, module: str, name: str, kind: str, **kwargs: Any) -> None:
+    def on_import(
+        self, index: int, module: str, name: str, kind: str, **kwargs: Any
+    ) -> None:
         eidx = kwargs.get("entity_index", index)
         if kind == "func":
             sig = kwargs.get("type_index", "?")
@@ -280,7 +308,9 @@ class BinaryReaderObjdumpDetails(BinaryReaderObjdumpBase):
             mn = kwargs.get("limits_min", 0)
             mx = kwargs.get("limits_max")
             mx_str = f" max={mx}" if mx is not None else ""
-            print(f' - memory[{eidx}] pages: initial={mn}{mx_str} <"{module}"."{name}">')
+            print(
+                f' - memory[{eidx}] pages: initial={mn}{mx_str} <"{module}"."{name}">'
+            )
         elif kind == "global":
             vt = kwargs.get("valtype", "?")
             mut = "mutable" if kwargs.get("mutable") else "const"
@@ -311,7 +341,9 @@ class BinaryReaderObjdumpDetails(BinaryReaderObjdumpBase):
 
     # ── global section ────────────────────────────────────────────────────
 
-    def on_global(self, index: int, valtype: str, mutable: bool, init_expr: str) -> None:
+    def on_global(
+        self, index: int, valtype: str, mutable: bool, init_expr: str
+    ) -> None:
         mut_str = "mutable" if mutable else "const"
         print(f" - global[{index}]: {valtype} {mut_str} - init {init_expr}")
 
@@ -340,17 +372,27 @@ class BinaryReaderObjdumpDetails(BinaryReaderObjdumpBase):
     ) -> None:
         if mode == "active":
             items = ", ".join(str(fi) for fi in func_indices)
-            print(f" - segment[{index}]: {mode} table={table_idx} offset={offset_expr} count={count} [{items}]")
+            print(
+                f" - segment[{index}]: {mode} table={table_idx} offset={offset_expr} count={count} [{items}]"
+            )
         else:
             print(f" - segment[{index}]: {mode} count={count}")
 
     # ── data section ──────────────────────────────────────────────────────
 
     def on_data(
-        self, index: int, mode: str, mem_idx: int, offset_expr: str, size: int, data: bytes
+        self,
+        index: int,
+        mode: str,
+        mem_idx: int,
+        offset_expr: str,
+        size: int,
+        data: bytes,
     ) -> None:
         if mode == "active":
-            print(f" - segment[{index}]: {mode} memory={mem_idx} offset={offset_expr} size={size}")
+            print(
+                f" - segment[{index}]: {mode} memory={mem_idx} offset={offset_expr} size={size}"
+            )
         else:
             print(f" - segment[{index}]: {mode} size={size}")
 
@@ -453,4 +495,3 @@ class BinaryReaderObjdumpDisassemble(BinaryReaderObjdumpBase):
 
     def on_opcode_select_t(self, types: List[str]) -> None:
         self._log_opcode(f"({', '.join(types)})")
-

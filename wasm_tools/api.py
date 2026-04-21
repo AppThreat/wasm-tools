@@ -162,8 +162,7 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
         state = self.objdump_state
 
         types = [
-            {"index": i,
-             "params": list(t.params), "results": list(t.results)}
+            {"index": i, "params": list(t.params), "results": list(t.results)}
             for i, t in enumerate(state.types)
             if t is not None
         ]
@@ -183,10 +182,17 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
             elif imp.kind == "table":
                 rec["ref_type"] = imp.table_ref_type
                 if imp.table_limits:
-                    rec["limits"] = {"min": imp.table_limits.minimum, "max": imp.table_limits.maximum}
+                    rec["limits"] = {
+                        "min": imp.table_limits.minimum,
+                        "max": imp.table_limits.maximum,
+                    }
             elif imp.kind == "memory":
                 if imp.mem_limits:
-                    rec["limits"] = {"min": imp.mem_limits.minimum, "max": imp.mem_limits.maximum, "is_64": imp.mem_limits.is_64}
+                    rec["limits"] = {
+                        "min": imp.mem_limits.minimum,
+                        "max": imp.mem_limits.maximum,
+                        "is_64": imp.mem_limits.is_64,
+                    }
             elif imp.kind == "global":
                 rec["valtype"] = imp.global_valtype
                 rec["mutable"] = imp.global_mutable
@@ -195,43 +201,80 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
             imports.append(rec)
 
         exports = [
-            {"index": exp.index, "name": exp.name, "kind": exp.kind, "ref_index": exp.ref_index}
-            for exp in state.exports if exp is not None
+            {
+                "index": exp.index,
+                "name": exp.name,
+                "kind": exp.kind,
+                "ref_index": exp.ref_index,
+            }
+            for exp in state.exports
+            if exp is not None
         ]
 
         globals_ = [
-            {"index": g.index, "valtype": g.valtype, "mutable": g.mutable, "init": g.init_expr}
-            for g in state.globals if g is not None
+            {
+                "index": g.index,
+                "valtype": g.valtype,
+                "mutable": g.mutable,
+                "init": g.init_expr,
+            }
+            for g in state.globals
+            if g is not None
         ]
 
         tables = [
-            {"index": t.index, "ref_type": t.ref_type,
-             "limits": {"min": t.limits.minimum, "max": t.limits.maximum}}
-            for t in state.tables if t is not None
+            {
+                "index": t.index,
+                "ref_type": t.ref_type,
+                "limits": {"min": t.limits.minimum, "max": t.limits.maximum},
+            }
+            for t in state.tables
+            if t is not None
         ]
 
         memories = [
-            {"index": m.index,
-             "limits": {"min": m.limits.minimum, "max": m.limits.maximum, "is_64": m.limits.is_64}}
-            for m in state.memories if m is not None
+            {
+                "index": m.index,
+                "limits": {
+                    "min": m.limits.minimum,
+                    "max": m.limits.maximum,
+                    "is_64": m.limits.is_64,
+                },
+            }
+            for m in state.memories
+            if m is not None
         ]
 
         data_segments = [
-            {"index": d.index, "mode": d.mode, "memory_index": d.memory_index,
-             "offset": d.offset_expr, "size": d.size}
-            for d in state.data_segments if d is not None
+            {
+                "index": d.index,
+                "mode": d.mode,
+                "memory_index": d.memory_index,
+                "offset": d.offset_expr,
+                "size": d.size,
+            }
+            for d in state.data_segments
+            if d is not None
         ]
 
         elements = [
-            {"index": e.index, "mode": e.mode, "ref_type": e.ref_type,
-             "table_index": e.table_index, "offset": e.offset_expr,
-             "count": e.count, "func_indices": list(e.func_indices)}
-            for e in state.elements if e is not None
+            {
+                "index": e.index,
+                "mode": e.mode,
+                "ref_type": e.ref_type,
+                "table_index": e.table_index,
+                "offset": e.offset_expr,
+                "count": e.count,
+                "func_indices": list(e.func_indices),
+            }
+            for e in state.elements
+            if e is not None
         ]
 
         tags = [
             {"index": tg.index, "type_index": tg.type_index}
-            for tg in state.tags if tg is not None
+            for tg in state.tags
+            if tg is not None
         ]
 
         analysis = self._build_analysis(functions, imports, data_segments)
@@ -331,7 +374,12 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
                 if op in bulk_memory:
                     bulk_memory_ops += 1
 
-                if op in {"call_indirect", "return_call_indirect", "call_ref", "return_call_ref"}:
+                if op in {
+                    "call_indirect",
+                    "return_call_indirect",
+                    "call_ref",
+                    "return_call_ref",
+                }:
                     indirect_call_ops += 1
                     dynamic_funcs.add(fn.get("index", -1))
 
@@ -370,7 +418,9 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
             "js.host": 6,
         }
         capability_score = sum(cap_risk.get(cap, 0) for cap in capabilities)
-        findings_score = sum(_HIGH_RISK_FINDING_WEIGHTS.get(f["id"], 5) for f in findings)
+        findings_score = sum(
+            _HIGH_RISK_FINDING_WEIGHTS.get(f["id"], 5) for f in findings
+        )
         risk_score = min(100, capability_score + findings_score)
 
         return {
@@ -385,7 +435,9 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
                     "memory_access_ops": memory_access_ops,
                     "memory_grow_ops": memory_grow_ops,
                     "bulk_memory_ops": bulk_memory_ops,
-                    "data_segment_total_bytes": sum(ds.get("size", 0) for ds in data_segments),
+                    "data_segment_total_bytes": sum(
+                        ds.get("size", 0) for ds in data_segments
+                    ),
                 },
                 "control_flow": {
                     "indirect_call_ops": indirect_call_ops,
@@ -475,7 +527,9 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
                         "indirect_call_ops": indirect_call_ops,
                         "table_mutation_ops": table_mutation_ops,
                         "dynamic_funcs": sorted(i for i in dynamic_funcs if i >= 0),
-                        "table_mutation_funcs": sorted(i for i in table_mutation_funcs if i >= 0),
+                        "table_mutation_funcs": sorted(
+                            i for i in table_mutation_funcs if i >= 0
+                        ),
                     },
                     "remediation": "Prefer immutable dispatch tables or add strict index validation around table mutations.",
                 }
@@ -549,7 +603,9 @@ def parse_wasm_file(path: str) -> dict[str, Any]:
         }
 
 
-def parse_wasm_bytes_json(data: bytes, filename: str = "<memory>", indent: int = 2) -> str:
+def parse_wasm_bytes_json(
+    data: bytes, filename: str = "<memory>", indent: int = 2
+) -> str:
     """Parse wasm bytes and serialize the structured report as JSON text."""
     report = parse_wasm_bytes(data, filename=filename)
     return json.dumps(report, ensure_ascii=False, indent=indent)
@@ -559,4 +615,3 @@ def parse_wasm_file_json(path: str, indent: int = 2) -> str:
     """Parse a wasm file and serialize the structured report as JSON text."""
     report = parse_wasm_file(path)
     return json.dumps(report, ensure_ascii=False, indent=indent)
-

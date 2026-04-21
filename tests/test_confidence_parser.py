@@ -3,7 +3,10 @@ from contextlib import redirect_stdout
 
 from wasm_tools.models import ObjdumpMode, ObjdumpOptions, ObjdumpState
 from wasm_tools.parser import BinaryReader
-from wasm_tools.visitor import BinaryReaderObjdumpDisassemble, BinaryReaderObjdumpPrepass
+from wasm_tools.visitor import (
+    BinaryReaderObjdumpDisassemble,
+    BinaryReaderObjdumpPrepass,
+)
 
 
 class ErrorDelegate:
@@ -38,9 +41,13 @@ def _disassemble_bytes(data: bytes) -> str:
 
     out = io.StringIO()
     with redirect_stdout(out):
-        BinaryReader(data, BinaryReaderObjdumpPrepass(data, options, state)).read_module()
+        BinaryReader(
+            data, BinaryReaderObjdumpPrepass(data, options, state)
+        ).read_module()
         options.mode = ObjdumpMode.DISASSEMBLE
-        BinaryReader(data, BinaryReaderObjdumpDisassemble(data, options, state)).read_module()
+        BinaryReader(
+            data, BinaryReaderObjdumpDisassemble(data, options, state)
+        ).read_module()
 
     return out.getvalue()
 
@@ -92,4 +99,3 @@ def test_disassembly_unknown_opcode_has_fallback_name():
     stdout = _disassemble_bytes(data)
 
     assert "unknown_00_c5" in stdout
-
