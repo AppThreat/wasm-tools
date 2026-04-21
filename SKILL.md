@@ -90,6 +90,7 @@ Use with `--json` and/or `--json-out` when you want only the high-level triage l
 When triaging host/runtime assumptions, inspect:
 
 - `analysis.detections.wasi` to confirm whether imports indicate WASI (`preview1`, `preview2-like`, or `legacy`),
+- `analysis.detections.js_interface` to identify JavaScript embedder-facing imports/exports and `wasm:*` builtin namespace usage,
 - `analysis.detections.format` to quickly identify non-core or parse-incompatible binaries.
 
 ## Security-focused usage patterns
@@ -99,7 +100,7 @@ When triaging host/runtime assumptions, inspect:
 3. Use `-d` for suspicious functions or proposal-heavy modules.
 4. Use `--json` or `--json-out` for reproducible evidence capture.
 5. Use `--analysis-only` when the full decode is too verbose for the immediate review task.
-6. For runtime compatibility checks, verify `analysis.detections.wasi` and `analysis.detections.format` before deeper policy decisions.
+6. For runtime compatibility checks, verify `analysis.detections.wasi`, `analysis.detections.js_interface`, and `analysis.detections.format` before deeper policy decisions.
 
 ## Output semantics that matter
 

@@ -122,6 +122,7 @@ The parser already extracts all imports. We extend this with:
 1. Normalize module names (e.g., `wasi_snapshot_preview1` → `wasi` v0.2).
 2. Group imports by (module, capability intent).
 3. Flag unusual or unknown module names.
+4. Emit JavaScript embedder signals in `analysis.detections.js_interface` for `js` / `wbg` namespaces, `wasm:*` builtin namespaces (for example `wasm:js-string`), and common glue symbol families.
 
 ### 2.2 Custom Section Analysis
 

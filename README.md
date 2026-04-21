@@ -240,6 +240,7 @@ The JSON report includes an `analysis` object designed for analyst triage.
 
 - `summary`: overall `risk_score`, `risk_tier`, and `finding_count`,
 - `detections.wasi`: explicit WASI import detection (`detected`, `variants`, matched import modules/count),
+- `detections.js_interface`: JavaScript-interface signals from imports/exports (`js`/`wbg` namespaces, `wasm:*` builtins such as `wasm:js-string`, and common glue symbol patterns),
 - `detections.format`: coarse format classification (`core`, `possible-component`, `invalid-core`) with evidence signals,
 - `capabilities`: inferred host capability tags from imports (for example `fs.path`, `network`, `process.terminate`),
 - `profiles.memory`: memory access density, `memory.grow`, bulk-memory activity, and total data segment bytes,
@@ -292,6 +293,7 @@ Representative fixtures include:
 - `adversarial_ops.wat` for edge immediates and `br_table`,
 - `wasi_capabilities.wat` for host capability/risk analysis checks,
 - `wasi_preview2_like.wat` for WASI preview2-like namespace detection (`wasi:*` imports),
+- `js_interface.wat` for JavaScript embedding detection (`js`, `wbg`, and `wasm:js-string` imports),
 - `dos_growth_loop.wat` for loop + `memory.grow` DoS heuristics.
 
 These fixtures are used in `tests/test_e2e.py` to validate the disassembly output and in `tests/test_json_api.py` to validate the structured API.

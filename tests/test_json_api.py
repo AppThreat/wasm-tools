@@ -104,6 +104,55 @@ def test_parse_wasm_file_detects_wasi_preview2_like_imports():
     assert any(module.startswith("wasi:") for module in wasi["import_modules"])
 
 
+def test_parse_wasm_file_detects_js_interface_signals():
+    report = parse_wasm_file(_fixture_path("js_interface.wasm"))
+
+    jsi = report["analysis"]["detections"]["js_interface"]
+    assert jsi["detected"] is True
+    assert jsi["confidence"] == "high"
+    assert "js_namespace_import" in jsi["signals"]
+    assert "wasm_builtin_namespace_import" in jsi["signals"]
+    assert "wbindgen_pattern" in jsi["signals"]
+    assert "wasm:js-string" in jsi["import_modules"]
+    assert "js-string" in jsi["builtin_sets"]
+    assert jsi["import_count"] >= 3
+    assert jsi["imports"] == [
+        {
+            "kind": "func",
+            "module": "js",
+            "name": "console_log",
+        },
+        {
+            "kind": "func",
+            "module": "wbg",
+            "name": "__wbindgen_throw",
+        },
+        {
+            "kind": "func",
+            "module": "wasm:js-string",
+            "name": "length",
+        },
+    ]
+    assert jsi["export_count"] >= 1
+    assert jsi["exports"] == [
+        {
+            "kind": "func",
+            "name": "__wbindgen_start",
+        },
+    ]
+
+
+def test_parse_wasm_file_keeps_js_interface_schema_when_not_detected():
+    report = parse_wasm_file(_fixture_path("simple_add.wasm"))
+
+    jsi = report["analysis"]["detections"]["js_interface"]
+    assert jsi["detected"] is False
+    assert jsi["confidence"] == "none"
+    assert jsi["signals"] == []
+    assert jsi["imports"] == []
+    assert jsi["exports"] == []
+
+
 def test_parse_wasm_file_marks_core_format_for_regular_module():
     report = parse_wasm_file(_fixture_path("simple_add.wasm"))
 
@@ -170,3 +219,4 @@ def test_parse_wasm_file_json_handles_read_errors(tmp_path):
     assert parsed["file"] == str(missing)
     assert parsed["errors"]
     assert parsed["function_count"] == 0
+    assert parsed["analysis"]["detections"]["js_interface"]["detected"] is False

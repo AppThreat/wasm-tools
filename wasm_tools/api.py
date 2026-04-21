@@ -281,6 +281,7 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
         analysis = self._build_analysis(
             functions=functions,
             imports=imports,
+            exports=exports,
             data_segments=data_segments,
             sections=self.sections,
             module_version=self.module_version,
@@ -312,6 +313,7 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
         self,
         functions: list[dict[str, Any]],
         imports: list[dict[str, Any]],
+        exports: list[dict[str, Any]],
         data_segments: list[dict[str, Any]],
         sections: list[dict[str, Any]],
         module_version: int | None,
@@ -400,6 +402,7 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
 
         capabilities = sorted(self._capabilities_from_imports(imports))
         wasi_detection = self._wasi_signals_from_imports(imports)
+        js_interface_detection = self._js_interface_signals(imports, exports)
         format_detection = self._format_signals(
             module_version=module_version,
             sections=sections,
@@ -449,6 +452,7 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
             },
             "detections": {
                 "wasi": wasi_detection,
+                "js_interface": js_interface_detection,
                 "format": format_detection,
             },
             "capabilities": capabilities,
@@ -503,6 +507,94 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
             "import_modules": modules,
             "import_count": import_count,
             "variants": variants,
+        }
+
+    def _js_interface_signals(
+        self,
+        imports: list[dict[str, Any]],
+        exports: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Classify JavaScript-interface import/export signals from decoded descriptors."""
+        signals: set[str] = set()
+        js_imports: list[dict[str, str]] = []
+        js_exports: list[dict[str, str]] = []
+        # `wasm:*` namespaces are reserved for JS-API builtin-set wiring.
+        builtin_sets = sorted(
+            {
+                str(imp.get("module", ""))[5:]
+                for imp in imports
+                if str(imp.get("module", "")).startswith("wasm:")
+            }
+        )
+
+        for imp in imports:
+            module = str(imp.get("module", ""))
+            name = str(imp.get("name", ""))
+            kind = str(imp.get("kind", ""))
+            is_js_related = False
+
+            if module in {"js", "wbg"}:
+                signals.add("js_namespace_import")
+                is_js_related = True
+            if module.startswith("wasm:"):
+                signals.add("wasm_builtin_namespace_import")
+                is_js_related = True
+            if module == "env" and any(
+                token in name
+                for token in (
+                    "log",
+                    "print",
+                    "console",
+                    "emscripten",
+                    "invoke_",
+                    "abort",
+                )
+            ):
+                signals.add("env_glue_import")
+                is_js_related = True
+            if name.startswith("__wbindgen") or name.startswith("__wbg_"):
+                signals.add("wbindgen_pattern")
+                is_js_related = True
+            if "emscripten" in name or name.startswith("invoke_"):
+                signals.add("emscripten_pattern")
+                is_js_related = True
+
+            if is_js_related:
+                js_imports.append({"module": module, "name": name, "kind": kind})
+
+        for exp in exports:
+            name = str(exp.get("name", ""))
+            kind = str(exp.get("kind", ""))
+            is_js_related = False
+            if name.startswith("__wbindgen") or name.startswith("__wbg_"):
+                signals.add("wbindgen_pattern")
+                is_js_related = True
+            if "emscripten" in name:
+                signals.add("emscripten_pattern")
+                is_js_related = True
+            if is_js_related:
+                js_exports.append({"name": name, "kind": kind})
+
+        # Confidence is tied to explicit namespace signals before name heuristics.
+        if {"js_namespace_import", "wasm_builtin_namespace_import"}.intersection(
+            signals
+        ):
+            confidence = "high"
+        elif signals:
+            confidence = "medium"
+        else:
+            confidence = "none"
+
+        return {
+            "detected": bool(signals),
+            "confidence": confidence,
+            "signals": sorted(signals),
+            "import_modules": sorted({item["module"] for item in js_imports}),
+            "import_count": len(js_imports),
+            "export_count": len(js_exports),
+            "builtin_sets": builtin_sets,
+            "imports": js_imports,
+            "exports": js_exports,
         }
 
     def _format_signals(
@@ -738,6 +830,17 @@ def parse_wasm_file(path: str) -> dict[str, Any]:
                         "import_modules": [],
                         "import_count": 0,
                         "variants": [],
+                    },
+                    "js_interface": {
+                        "detected": False,
+                        "confidence": "none",
+                        "signals": [],
+                        "import_modules": [],
+                        "import_count": 0,
+                        "export_count": 0,
+                        "builtin_sets": [],
+                        "imports": [],
+                        "exports": [],
                     },
                     "format": {
                         "kind": "invalid-core",

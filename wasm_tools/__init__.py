@@ -8,4 +8,4 @@ from .models import ObjdumpMode, ObjdumpOptions, ObjdumpState
 from .parser import BinaryReader
 from .visitor import BinaryReaderObjdumpDisassemble, BinaryReaderObjdumpPrepass
 
-__version__ = "1.0.1"
+__version__ = "1.0.2"
