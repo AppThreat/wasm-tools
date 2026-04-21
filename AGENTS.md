@@ -6,6 +6,14 @@
 - Core package: `wasm_tools/`; behavior is mostly in parser + visitor callbacks, not in large class hierarchies.
 - CLI entrypoint is the script name `wasm-tools` from `pyproject.toml` (`wasm_tools.cli:main`).
 
+## Documentation map
+
+- `README.md` — quick-start and CLI reference.
+- `ARCHITECTURE.md` — binary format, parser internals, and design decisions. Read this before touching `parser.py` or `visitor.py`.
+- `ANALYST_GUIDE.md` — practical field guide for security analysts: JSON field reference, triage recipes, worked examples. **Start here if you are triaging an unknown `.wasm` file.**
+- `AGENTS.md` — this file. Conventions for automated agents and contributors.
+- `SKILL.md` — high-level capability description.
+
 ## Architecture (read these first)
 
 - `wasm_tools/parser.py` (`BinaryReader`) owns binary decoding and section/instruction traversal.
