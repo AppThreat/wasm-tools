@@ -1,6 +1,7 @@
 # tests/test_details.py
 """Dedicated tests for the -x (--details) output mode."""
 
+import json
 import os
 
 import pytest
@@ -165,6 +166,83 @@ def test_cli_headers_single_sections_banner(monkeypatch, capsys, tmp_path):
     cli.main()
     out = capsys.readouterr().out
     assert out.count("Sections:") == 1
+
+
+def test_cli_json_out_writes_minified_report(monkeypatch, capsys, tmp_path):
+    import shutil
+
+    src = os.path.join(FIXTURES_DIR, "simple_add.wasm")
+    wasm_path = tmp_path / "simple_add.wasm"
+    out_path = tmp_path / "simple_add.json"
+    shutil.copy(src, wasm_path)
+
+    monkeypatch.setattr("sys.argv", ["wasm-tools", str(wasm_path), "--json-out", str(out_path)])
+    cli.main()
+
+    stdout = capsys.readouterr().out
+    assert stdout == ""
+    text = out_path.read_text(encoding="utf-8")
+    assert "\n" not in text
+    assert ": " not in text
+    assert ", " not in text
+    parsed = json.loads(text)
+    assert parsed["file"] == str(wasm_path)
+    assert parsed["errors"] == []
+
+
+def test_cli_json_prints_minified_report_to_stdout(monkeypatch, capsys, tmp_path):
+    import shutil
+
+    src = os.path.join(FIXTURES_DIR, "simple_add.wasm")
+    wasm_path = tmp_path / "simple_add.wasm"
+    shutil.copy(src, wasm_path)
+
+    monkeypatch.setattr("sys.argv", ["wasm-tools", str(wasm_path), "--json"])
+    cli.main()
+
+    stdout = capsys.readouterr().out.strip()
+    assert "\n" not in stdout
+    assert ": " not in stdout
+    assert ", " not in stdout
+    parsed = json.loads(stdout)
+    assert parsed["file"] == str(wasm_path)
+    assert parsed["errors"] == []
+
+
+def test_cli_json_and_json_out_emit_both(monkeypatch, capsys, tmp_path):
+    import shutil
+
+    src = os.path.join(FIXTURES_DIR, "simple_add.wasm")
+    wasm_path = tmp_path / "simple_add.wasm"
+    out_path = tmp_path / "simple_add.json"
+    shutil.copy(src, wasm_path)
+
+    monkeypatch.setattr(
+        "sys.argv",
+        ["wasm-tools", str(wasm_path), "--json", "--json-out", str(out_path)],
+    )
+    cli.main()
+
+    stdout = capsys.readouterr().out.strip()
+    parsed_stdout = json.loads(stdout)
+    parsed_file = json.loads(out_path.read_text(encoding="utf-8"))
+    assert parsed_stdout == parsed_file
+
+
+def test_cli_json_out_write_error_exits(monkeypatch, capsys, tmp_path):
+    import shutil
+
+    src = os.path.join(FIXTURES_DIR, "simple_add.wasm")
+    wasm_path = tmp_path / "simple_add.wasm"
+    shutil.copy(src, wasm_path)
+
+    # Writing to a directory path should fail with a clear CLI error.
+    monkeypatch.setattr("sys.argv", ["wasm-tools", str(wasm_path), "--json-out", str(tmp_path)])
+    with pytest.raises(SystemExit):
+        cli.main()
+
+    stderr = capsys.readouterr().err
+    assert "Error writing" in stderr
 
 
 def test_details_datacount_section_includes_count(capsys):

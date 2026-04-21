@@ -1,6 +1,8 @@
 import argparse
+import json
 import sys
 
+from .api import parse_wasm_bytes
 from .models import ObjdumpMode, ObjdumpOptions, ObjdumpState
 from .parser import BinaryReader
 from .visitor import (
@@ -25,6 +27,16 @@ def main() -> None:
     parser.add_argument(
         "-d", "--disassemble", action="store_true", help="Disassemble function bodies"
     )
+    parser.add_argument(
+        "--json-out",
+        metavar="PATH",
+        help="Write a minified JSON report to PATH",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print a minified JSON report to stdout",
+    )
 
     args = parser.parse_args()
 
@@ -39,6 +51,20 @@ def main() -> None:
         sys.exit(1)
 
     state = ObjdumpState()
+
+    if args.json or args.json_out:
+        report = parse_wasm_bytes(data, filename=args.file)
+        payload = json.dumps(report, ensure_ascii=False, separators=(",", ":"))
+        if args.json:
+            print(payload)
+        try:
+            if args.json_out:
+                with open(args.json_out, "w", encoding="utf-8") as out_file:
+                    out_file.write(payload)
+        except Exception as e:
+            print(f"Error writing {args.json_out}: {e}", file=sys.stderr)
+            sys.exit(1)
+        return
 
     # Pass 1: Prepass – collect names, types, section metadata into state.
     options.mode = ObjdumpMode.PREPASS

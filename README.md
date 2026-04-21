@@ -155,6 +155,8 @@ Current CLI flags in `wasm_tools/cli.py`:
 - `-h`, `--headers` — print section header table with ids, sizes, and offsets
 - `-x`, `--details` — print section contents: type signatures, imports, exports, globals, tables, memories, data segments, elements, tags, and code body summaries
 - `-d`, `--disassemble` — decode and print function body instructions
+- `--json` — print a minified JSON report to stdout
+- `--json-out PATH` — write a minified JSON report to `PATH`
 
 With no flags, `--details` is the default.
 
@@ -163,6 +165,24 @@ Index notes for CLI output:
 - function/global/table/memory/tag indices are printed in module-global index space,
 - locally-defined function bodies therefore start at `func[imported_function_count]` when function imports are present,
 - section detail headers use entry counts (for example `Function[3]`, `Code[3]`, `Data[1]`) and `DataCount` prints the decoded count value.
+
+Write a minified JSON report to a file:
+
+```bash
+wasm-tools tests/fixtures/simple_add.wasm --json-out simple_add.json
+```
+
+Print a minified JSON report to stdout:
+
+```bash
+wasm-tools tests/fixtures/simple_add.wasm --json
+```
+
+Use both JSON options together to write a file and print the same payload:
+
+```bash
+wasm-tools tests/fixtures/simple_add.wasm --json --json-out simple_add.json
+```
 
 ## Library usage
 
