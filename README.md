@@ -128,12 +128,6 @@ The library now covers the full WebAssembly binary format at the decoding level.
 2. Text-format (`.wat`) input is handled externally by WABT and is not in scope.
 3. The specification snapshot is kept locally under `specification/wasm-latest/` to serve as an authoritative reference during development but is not shipped with the distributed package.
 
-For integration work, the practical next steps are:
-
-1. wire `parse_wasm_file()` into blint or similar tooling to consume the structured report,
-2. add tests for any module shapes found in the wild that expose parsing gaps,
-3. tag `v0.1.0` for the first PyPI release once the CI workflow validates cleanly.
-
 ## Command-line usage
 
 The installed console script is `wasm-tools`, as defined in `pyproject.toml`.
@@ -299,17 +293,6 @@ poetry run pytest -q
 poetry run python tests/fixtures/build.py
 ```
 
-## Release and packaging notes
-
-`pyproject.toml` declares:
-
-- Python `>=3.10`,
-- no runtime third-party dependencies,
-- optional development dependencies `pytest` and `pytest-cov`,
-- console script `wasm-tools = "wasm_tools.cli:main"`.
-
-The GitHub Actions workflow in `.github/workflows/publish.yml` builds and publishes tagged releases, verifies that the project version matches the git tag, and generates a CycloneDX SBOM during release automation.
-
 ## Guidance for reviewers and integrators
 
 If you are evaluating this project for security tooling or pipeline integration, start with these files:
@@ -319,8 +302,6 @@ If you are evaluating this project for security tooling or pipeline integration,
 - `wasm_tools/api.py` for the stable integration surface,
 - `tests/test_e2e.py` for output expectations,
 - `specification/wasm-latest/5.3-binary.instructions.spectec` for spec alignment work.
-
-For integration into systems such as OWASP blint, the current recommendation is to consume `parse_wasm_file()` or `parse_wasm_bytes()` and treat the result as a structured inspection record rather than a final semantic judgment. The parser is intentionally simple, partial, and auditable. That is an advantage for review, but it also means consumers should keep validation logic and policy decisions outside this library.
 
 ## License
 
