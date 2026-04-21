@@ -48,9 +48,6 @@ def main() -> None:
     # Pass 2: Selected output mode.
     if args.headers:
         options.mode = ObjdumpMode.HEADERS
-        print("\nSections:\n")
-        print(f"  {'id':>3} {'name':<16} {'size':>6}  {'offset'}")
-        print(f"  {'-'*3} {'-'*16} {'-'*6}  {'-'*8}")
         headers_reader = BinaryReaderObjdumpHeaders(data, options, state)
         BinaryReader(data, headers_reader).read_module()
     elif args.disassemble:

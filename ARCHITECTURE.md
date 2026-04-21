@@ -153,6 +153,11 @@ if hasattr(self.delegate, "on_function"):
 
 This means a minimal delegate implementing only `begin_module`, `begin_section`, and `begin_custom_section` is sufficient to drive a full parse. A visitor that cares about instructions only needs to implement `begin_function_body`, `on_opcode`, and the immediate callbacks it uses. Nothing breaks if a callback is absent.
 
+Index semantics are important for consumers that compare against `wasm-objdump`.
+
+- `begin_section(index, code, size)` uses `index` as the encounter order in the binary stream.
+- Entity callbacks (`on_function`, `on_global`, `on_table`, `on_memory`, `on_tag`, and `begin_function_body`) use module-global index spaces. Locally-defined entries are offset by imported entries of the same kind.
+
 The available callbacks are:
 
 ```

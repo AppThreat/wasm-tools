@@ -39,9 +39,7 @@ class BinaryReaderObjdumpBase(BinaryReaderNop):
         self.current_opcode: Any = None
 
     def begin_module(self, version: int) -> None:
-        if self.options.mode == ObjdumpMode.HEADERS:
-            print("\nSections:\n")
-        elif self.options.mode == ObjdumpMode.DETAILS:
+        if self.options.mode == ObjdumpMode.DETAILS:
             print("\nSection Details:\n")
         elif self.options.mode == ObjdumpMode.DISASSEMBLE:
             print("\nCode Disassembly:\n")
@@ -83,6 +81,17 @@ class BinaryReaderObjdumpPrepass(BinaryReaderObjdumpBase):
         self.objdump_state.types[index] = ft
 
     def on_import(self, index: int, module: str, name: str, kind: str, **kwargs: Any) -> None:
+        if kind == "func":
+            self.objdump_state.imported_function_count += 1
+        elif kind == "table":
+            self.objdump_state.imported_table_count += 1
+        elif kind == "memory":
+            self.objdump_state.imported_memory_count += 1
+        elif kind == "global":
+            self.objdump_state.imported_global_count += 1
+        elif kind == "tag":
+            self.objdump_state.imported_tag_count += 1
+
         entry = ImportEntry(
             index=index,
             module=module,
@@ -182,6 +191,9 @@ class BinaryReaderObjdumpPrepass(BinaryReaderObjdumpBase):
             self.objdump_state.tags.append(None)  # type: ignore
         self.objdump_state.tags[index] = entry
 
+    def on_data_count(self, count: int) -> None:
+        self.objdump_state.data_count = count
+
 
 class BinaryReaderObjdumpHeaders(BinaryReaderObjdumpBase):
     """Emit a section-header table (wasm-objdump -h style)."""
@@ -189,6 +201,11 @@ class BinaryReaderObjdumpHeaders(BinaryReaderObjdumpBase):
     def __init__(self, data: bytes, options: ObjdumpOptions, state: ObjdumpState) -> None:
         super().__init__(data, options, state)
         self._section_count = 0
+
+    def begin_module(self, version: int) -> None:
+        print("\nSections:\n")
+        print(f"  {'id':>3} {'name':<16} {'size':>6}  {'offset'}")
+        print(f"  {'-'*3} {'-'*16} {'-'*6}  {'-'*8}")
 
     def begin_section(self, section_index: int, section_code: int, size: int) -> None:
         super().begin_section(section_index, section_code, size)
@@ -203,15 +220,38 @@ class BinaryReaderObjdumpDetails(BinaryReaderObjdumpBase):
 
     # ── module banner ──────────────────────────────────────────────────────
 
-    def _section_header(self, section_code: int, name: str) -> None:
-        print(f"{name}[{section_code}]:")
+    def _count_non_none(self, values: list[Any]) -> int:
+        return sum(1 for v in values if v is not None)
 
-    def begin_section(self, section_index: int, section_code: int, size: int) -> None:
-        super().begin_section(section_index, section_code, size)
-        # Print the section header only for non-custom handled sections
-        if section_code not in (BinarySection.CUSTOM, BinarySection.CODE):
-            name = SECTION_NAMES.get(section_code, f"Unknown_{section_code}")
-            print(f"\n{name}[{section_index}]:")
+    def _section_entry_count(self, section_code: int) -> int:
+        state = self.objdump_state
+        if section_code == BinarySection.TYPE:
+            return self._count_non_none(state.types)
+        if section_code == BinarySection.IMPORT:
+            return self._count_non_none(state.imports)
+        if section_code == BinarySection.FUNCTION:
+            return len(state.function_types)
+        if section_code == BinarySection.TABLE:
+            return self._count_non_none(state.tables)
+        if section_code == BinarySection.MEMORY:
+            return self._count_non_none(state.memories)
+        if section_code == BinarySection.GLOBAL:
+            return self._count_non_none(state.globals)
+        if section_code == BinarySection.EXPORT:
+            return self._count_non_none(state.exports)
+        if section_code == BinarySection.START:
+            return 1 if state.start_function is not None else 0
+        if section_code == BinarySection.ELEMENT:
+            return self._count_non_none(state.elements)
+        if section_code == BinarySection.CODE:
+            return len(state.function_types)
+        if section_code == BinarySection.DATA:
+            return self._count_non_none(state.data_segments)
+        if section_code == BinarySection.DATA_COUNT:
+            return 1 if state.data_count is not None else 0
+        if section_code == BinarySection.TAG:
+            return self._count_non_none(state.tags)
+        return 0
 
     def begin_custom_section(self, section_index: int, size: int, section_name: str) -> None:
         print(f"\nCustom[{section_index}] \"{section_name}\":")
@@ -319,19 +359,26 @@ class BinaryReaderObjdumpDetails(BinaryReaderObjdumpBase):
     def on_tag(self, index: int, type_index: int) -> None:
         print(f" - tag[{index}]: sig={type_index}")
 
-    # ── code section ─────────────────────────────────────────────────────
-
     def begin_section(self, section_index: int, section_code: int, size: int) -> None:
-        BinaryReaderObjdumpBase.begin_section(self, section_index, section_code, size)
-        if section_code not in (BinarySection.CUSTOM,):
-            name = SECTION_NAMES.get(section_code, f"Unknown_{section_code}")
-            print(f"\n{name}[{section_index}]:")
+        super().begin_section(section_index, section_code, size)
+        if section_code == BinarySection.CUSTOM:
+            return
+        name = SECTION_NAMES.get(section_code, f"Unknown_{section_code}")
+        if section_code == BinarySection.DATA_COUNT:
+            print("\nDataCount:")
+            return
+        print(f"\n{name}[{self._section_entry_count(section_code)}]:")
+
+    # ── code section ─────────────────────────────────────────────────────
 
     def begin_function_body(self, index: int, size: int) -> None:
         name = self.objdump_state.function_names.get(index, "")
         sig_idx = self.objdump_state.function_types.get(index, "?")
         name_str = f" <{name}>" if name else ""
         print(f" - func[{index}]: size={size} sig={sig_idx}{name_str}")
+
+    def on_data_count(self, count: int) -> None:
+        print(f" - data count: {count}")
 
 
 class BinaryReaderObjdumpDisassemble(BinaryReaderObjdumpBase):

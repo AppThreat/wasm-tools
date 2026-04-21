@@ -54,6 +54,14 @@ def test_parse_wasm_file_captures_bulk_memory_immediates():
     )
 
 
+def test_parse_wasm_file_uses_module_global_function_indices_with_imports():
+    report = parse_wasm_file(_fixture_path("globals_imports.wasm"))
+
+    assert report["errors"] == []
+    assert report["function_count"] == 1
+    assert report["functions"][0]["index"] == 1
+
+
 def test_parse_wasm_bytes_json_includes_unicode_content():
     raw = _fixture_bytes("unicode_names.wasm")
     json_text = parse_wasm_bytes_json(raw, filename="unicode_names.wasm")

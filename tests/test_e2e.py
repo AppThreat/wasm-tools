@@ -132,6 +132,8 @@ def test_e2e_globals_imports(capsys):
 
     stdout = capsys.readouterr().out
 
+    # One imported function shifts the defined body to func[1].
+    assert "func[1]:" in stdout
     assert "global.get 1" in stdout  # Import is global 0, internal global is 1
     assert "f64.const 1.5" in stdout
     assert "f64.add" in stdout

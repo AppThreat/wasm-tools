@@ -90,6 +90,9 @@ def test_details_import_section(capsys):
     out = capsys.readouterr().out
     assert "Import[" in out
     assert "sig=" in out
+    assert "func[0] sig=0" in out
+    assert "Function[1]" in out
+    assert "func[1]: sig=1" in out
 
 
 # ─── function + code sections ─────────────────────────────────────────────────
@@ -98,9 +101,9 @@ def test_details_function_and_code_sections(capsys):
     data = _fixture("simple_add.wasm")
     _run_details(data)
     out = capsys.readouterr().out
-    assert "Function[" in out
+    assert "Function[1]" in out
     assert "func[0]" in out
-    assert "Code[" in out
+    assert "Code[1]" in out
 
 
 # ─── global section ───────────────────────────────────────────────────────────
@@ -149,6 +152,27 @@ def test_cli_details_default_mode(monkeypatch, capsys, tmp_path):
     cli.main()
     out = capsys.readouterr().out
     assert "Section Details:" in out
+
+
+def test_cli_headers_single_sections_banner(monkeypatch, capsys, tmp_path):
+    """--headers should print a single section banner/table header."""
+    import shutil
+
+    src = os.path.join(FIXTURES_DIR, "simple_add.wasm")
+    dst = tmp_path / "simple_add.wasm"
+    shutil.copy(src, dst)
+    monkeypatch.setattr("sys.argv", ["wasm-tools", str(dst), "--headers"])
+    cli.main()
+    out = capsys.readouterr().out
+    assert out.count("Sections:") == 1
+
+
+def test_details_datacount_section_includes_count(capsys):
+    data = _fixture("bulk_memory.wasm")
+    _run_details(data)
+    out = capsys.readouterr().out
+    assert "DataCount:" in out
+    assert "data count: 1" in out
 
 
 # ─── ObjdumpState richness ────────────────────────────────────────────────────

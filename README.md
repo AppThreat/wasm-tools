@@ -28,6 +28,7 @@ The repository itself already reflects this review posture:
 
 - parser failures are covered by unit tests for malformed input,
 - end-to-end tests assert exact disassembly substrings,
+- CLI and JSON outputs use module-global index spaces for functions, globals, tables, memories, and tags, including imported-entity offsets.
 
 ## Architecture
 
@@ -156,6 +157,12 @@ Current CLI flags in `wasm_tools/cli.py`:
 - `-d`, `--disassemble` — decode and print function body instructions
 
 With no flags, `--details` is the default.
+
+Index notes for CLI output:
+
+- function/global/table/memory/tag indices are printed in module-global index space,
+- locally-defined function bodies therefore start at `func[imported_function_count]` when function imports are present,
+- section detail headers use entry counts (for example `Function[3]`, `Code[3]`, `Data[1]`) and `DataCount` prints the decoded count value.
 
 ## Library usage
 

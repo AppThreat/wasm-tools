@@ -215,3 +215,9 @@ class ObjdumpState:
         self.elements: List[ElementEntry] = []
         self.tags: List[TagEntry] = []
         self.start_function: Optional[int] = None
+        self.data_count: Optional[int] = None
+        self.imported_function_count: int = 0
+        self.imported_table_count: int = 0
+        self.imported_memory_count: int = 0
+        self.imported_global_count: int = 0
+        self.imported_tag_count: int = 0

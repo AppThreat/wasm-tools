@@ -66,6 +66,12 @@ class BinaryReader:
         self.size = len(data)
         self.offset = 0
         self.delegate = delegate
+        # Imported entities shift indices for locally-defined section entries.
+        self.imported_function_count = 0
+        self.imported_table_count = 0
+        self.imported_memory_count = 0
+        self.imported_global_count = 0
+        self.imported_tag_count = 0
 
     # ─── Primitive readers ───────────────────────────────────────────────────
 
@@ -259,6 +265,7 @@ class BinaryReader:
         version = self.read_u32()
         self.delegate.begin_module(version)
 
+        section_index = 0
         while self.offset < self.size:
             section_id = self.read_u8()
             section_size = self.read_leb128(max_bits=32)
@@ -267,20 +274,21 @@ class BinaryReader:
                 raise WasmParseError("Section length extends beyond file boundary")
 
             self.delegate.offset = self.offset
-            self.delegate.begin_section(section_id, section_id, section_size)
+            self.delegate.begin_section(section_index, section_id, section_size)
 
             try:
-                self._decode_section(section_id, end_offset)
+                self._decode_section(section_index, section_id, end_offset)
             except WasmParseError:
                 raise
             except Exception:
                 pass  # skip broken sections gracefully
 
             self.offset = end_offset
+            section_index += 1
 
-    def _decode_section(self, section_id: int, end_offset: int) -> None:
+    def _decode_section(self, section_index: int, section_id: int, end_offset: int) -> None:
         if section_id == BinarySection.CUSTOM:
-            self._decode_custom(end_offset)
+            self._decode_custom(section_index, end_offset)
         elif section_id == BinarySection.TYPE:
             self._decode_type(end_offset)
         elif section_id == BinarySection.IMPORT:
@@ -310,9 +318,9 @@ class BinaryReader:
 
     # ─── Section decoders ────────────────────────────────────────────────────
 
-    def _decode_custom(self, end_offset: int) -> None:
+    def _decode_custom(self, section_index: int, end_offset: int) -> None:
         name = self.read_string()
-        self.delegate.begin_custom_section(0, end_offset - self.offset, name)
+        self.delegate.begin_custom_section(section_index, end_offset - self.offset, name)
         if name == "name":
             while self.offset < end_offset:
                 sub_id = self.read_u8()
@@ -425,13 +433,18 @@ class BinaryReader:
                 tag_idx += 1
             if hasattr(self.delegate, "on_import"):
                 self.delegate.on_import(i, module, name, kind, **extra)
+        self.imported_function_count = func_idx
+        self.imported_table_count = table_idx
+        self.imported_memory_count = mem_idx
+        self.imported_global_count = global_idx
+        self.imported_tag_count = tag_idx
 
     def _decode_function(self, end_offset: int) -> None:
         count = self.read_leb128(max_bits=32)
         for i in range(count):
             sig_idx = self.read_leb128(max_bits=32)
             if hasattr(self.delegate, "on_function"):
-                self.delegate.on_function(i, sig_idx)
+                self.delegate.on_function(self.imported_function_count + i, sig_idx)
 
     def _decode_table(self, end_offset: int) -> None:
         count = self.read_leb128(max_bits=32)
@@ -444,14 +457,14 @@ class BinaryReader:
             ref_type = self.read_reftype()
             mn, mx, is64 = self.read_limits()
             if hasattr(self.delegate, "on_table"):
-                self.delegate.on_table(i, ref_type, mn, mx, is64)
+                self.delegate.on_table(self.imported_table_count + i, ref_type, mn, mx, is64)
 
     def _decode_memory(self, end_offset: int) -> None:
         count = self.read_leb128(max_bits=32)
         for i in range(count):
             mn, mx, is64 = self.read_limits()
             if hasattr(self.delegate, "on_memory"):
-                self.delegate.on_memory(i, mn, mx, is64)
+                self.delegate.on_memory(self.imported_memory_count + i, mn, mx, is64)
 
     def _decode_global(self, end_offset: int) -> None:
         count = self.read_leb128(max_bits=32)
@@ -459,7 +472,7 @@ class BinaryReader:
             vt, mut = self.read_globaltype()
             init_expr = self.read_init_expr()
             if hasattr(self.delegate, "on_global"):
-                self.delegate.on_global(i, vt, mut, init_expr)
+                self.delegate.on_global(self.imported_global_count + i, vt, mut, init_expr)
 
     def _decode_export(self, end_offset: int) -> None:
         count = self.read_leb128(max_bits=32)
@@ -546,8 +559,9 @@ class BinaryReader:
         for i in range(count):
             body_size = self.read_leb128(max_bits=32)
             b_end = self.offset + body_size
+            func_idx = self.imported_function_count + i
             if hasattr(self.delegate, "begin_function_body"):
-                self.delegate.begin_function_body(i, body_size)
+                self.delegate.begin_function_body(func_idx, body_size)
 
             local_decl_count = self.read_leb128(max_bits=32)
             locals_list: List[Tuple[int, str]] = []
@@ -556,11 +570,11 @@ class BinaryReader:
                 ltype = self.read_valtype()
                 locals_list.append((lcount, ltype))
                 if hasattr(self.delegate, "on_local_decl"):
-                    self.delegate.on_local_decl(i, len(locals_list) - 1, lcount, ltype)
+                    self.delegate.on_local_decl(func_idx, len(locals_list) - 1, lcount, ltype)
 
             self.read_instructions(b_end)
             if hasattr(self.delegate, "end_function_body"):
-                self.delegate.end_function_body(i)
+                self.delegate.end_function_body(func_idx)
 
     def _decode_data(self, end_offset: int) -> None:
         count = self.read_leb128(max_bits=32)
@@ -592,7 +606,7 @@ class BinaryReader:
             self.read_u8()  # attribute (always 0x00)
             type_idx = self.read_leb128(max_bits=32)
             if hasattr(self.delegate, "on_tag"):
-                self.delegate.on_tag(i, type_idx)
+                self.delegate.on_tag(self.imported_tag_count + i, type_idx)
 
     # ─── Instruction decoder ─────────────────────────────────────────────────
 
