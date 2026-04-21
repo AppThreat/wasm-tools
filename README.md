@@ -44,7 +44,7 @@ The CLI and the JSON API both run the parse twice. The first pass collects names
 
 ## Relationship to the specification
 
-The repository now includes a local specification snapshot under `specification/wasm-latest/`. The most relevant files for current implementation work are:
+The repository includes a local specification snapshot under `specification/wasm-latest/`. The most relevant files for current implementation work are:
 
 - `specification/wasm-latest/5.3-binary.instructions.spectec`
 - `specification/wasm-latest/5.4-binary.modules.spectec`
@@ -122,7 +122,7 @@ Status terms used below:
 
 ### How to use this matrix
 
-The library now covers the full WebAssembly binary format at the decoding level. The remaining gaps are deliberate scope choices rather than missing work items:
+The library covers the full WebAssembly binary format at the decoding level. The remaining gaps are deliberate scope choices rather than missing work items:
 
 1. Spec validation (type checking, structural constraints from chapters 2 and 3 of the spec) is not the goal of this library. Validation belongs in a downstream consumer such as a language runtime.
 2. Text-format (`.wat`) input is handled externally by WABT and is not in scope.
@@ -239,6 +239,8 @@ This shape is covered by `tests/test_json_api.py`.
 The JSON report includes an `analysis` object designed for analyst triage.
 
 - `summary`: overall `risk_score`, `risk_tier`, and `finding_count`,
+- `detections.wasi`: explicit WASI import detection (`detected`, `variants`, matched import modules/count),
+- `detections.format`: coarse format classification (`core`, `possible-component`, `invalid-core`) with evidence signals,
 - `capabilities`: inferred host capability tags from imports (for example `fs.path`, `network`, `process.terminate`),
 - `profiles.memory`: memory access density, `memory.grow`, bulk-memory activity, and total data segment bytes,
 - `profiles.control_flow`: dynamic dispatch metrics (`call_indirect`, `call_ref`) and table mutation counts,
@@ -251,6 +253,7 @@ Current built-in finding ids:
 - `WASM-CFG-002`: indirect call surface combined with mutable table operations.
 - `WASM-DOS-003`: memory growth in loop context.
 - `WASM-LOOP-004`: deep loop nesting amplification signal.
+- `WASM-FMT-005`: binary appears to be non-core or otherwise parse-incompatible for this decoder.
 
 ## Error handling model
 
@@ -288,6 +291,7 @@ Representative fixtures include:
 - `unicode_names.wat` for Unicode content,
 - `adversarial_ops.wat` for edge immediates and `br_table`,
 - `wasi_capabilities.wat` for host capability/risk analysis checks,
+- `wasi_preview2_like.wat` for WASI preview2-like namespace detection (`wasi:*` imports),
 - `dos_growth_loop.wat` for loop + `memory.grow` DoS heuristics.
 
 These fixtures are used in `tests/test_e2e.py` to validate the disassembly output and in `tests/test_json_api.py` to validate the structured API.

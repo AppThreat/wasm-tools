@@ -251,8 +251,9 @@ The prepass needs to run first because the `name` custom section appears after t
 The collector also computes an `analysis` block for security triage. This layer is heuristic and does not change parsing behavior.
 
 - **Capability inference** maps imports into higher-level host capabilities such as filesystem, network, process termination, random, and JS host interaction.
+- **Detection rules** add explicit `analysis.detections` signals for WASI usage and coarse module format classification (`core`, `possible-component`, `invalid-core`).
 - **Behavior profiles** summarize memory, control-flow, and compute complexity signals from decoded opcode streams.
-- **Findings** are stable-id rule checks (`WASM-CAP-001`, `WASM-CFG-002`, `WASM-DOS-003`, `WASM-LOOP-004`) with severity, confidence, evidence, and remediation text.
+- **Findings** are stable-id rule checks (`WASM-CAP-001`, `WASM-CFG-002`, `WASM-DOS-003`, `WASM-LOOP-004`, `WASM-FMT-005`) with severity, confidence, evidence, and remediation text.
 - **Risk scoring** combines capability and finding weights into a bounded 0-100 score and a tier (`none`, `low`, `medium`, `high`).
 
 The public API functions (`parse_wasm_bytes`, `parse_wasm_file`, `parse_wasm_bytes_json`, `parse_wasm_file_json`) wrap the two-pass pipeline and handle OS errors at the file read level.

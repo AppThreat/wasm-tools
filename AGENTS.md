@@ -20,6 +20,7 @@
   2. Mode-specific visitor (currently disassembly) prints output using prepass state.
 - Name custom section handling happens in parser (`section_id == CUSTOM`, `name == "name"`) and feeds `on_function_name`.
 - Disassembly formatting is centralized in `BinaryReaderObjdumpDisassemble._log_opcode`; tests assert exact substrings from stdout.
+- High-level security detections (for example WASI capability/format signals) belong in `wasm_tools/api.py` analysis helpers, not in parser decode branches.
 
 ## Critical workflows
 
@@ -47,6 +48,7 @@
 - Maintain output wording/shape used by tests (examples in `tests/test_e2e.py`: `"Code Disassembly:"`, `"func[0]:"`, opcode text like `"call_indirect 0 0"`).
 - When adding opcodes/immediates, update both `ImmType`/`OPCODES` and parser dispatch branches in `read_instructions()`.
 - Offsets printed in disassembly depend on `get_print_offset()` and `section_offsets`; avoid changing default offset semantics unless tests are updated.
+- Keep `analysis` schema backward compatible (`summary`, `detections`, `capabilities`, `profiles`, `findings`) and add new detection keys with tests.
 
 ## Integration points and dependencies
 

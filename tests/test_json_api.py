@@ -86,6 +86,46 @@ def test_parse_wasm_file_detects_wasi_capability_combo_risk():
     assert "WASM-CAP-001" in finding_ids
 
 
+def test_parse_wasm_file_detects_wasi_preview1_imports():
+    report = parse_wasm_file(_fixture_path("wasi_capabilities.wasm"))
+
+    wasi = report["analysis"]["detections"]["wasi"]
+    assert wasi["detected"] is True
+    assert "wasi_snapshot_preview1" in wasi["import_modules"]
+    assert "preview1" in wasi["variants"]
+
+
+def test_parse_wasm_file_detects_wasi_preview2_like_imports():
+    report = parse_wasm_file(_fixture_path("wasi_preview2_like.wasm"))
+
+    wasi = report["analysis"]["detections"]["wasi"]
+    assert wasi["detected"] is True
+    assert "preview2-like" in wasi["variants"]
+    assert any(module.startswith("wasi:") for module in wasi["import_modules"])
+
+
+def test_parse_wasm_file_marks_core_format_for_regular_module():
+    report = parse_wasm_file(_fixture_path("simple_add.wasm"))
+
+    fmt = report["analysis"]["detections"]["format"]
+    assert fmt["kind"] == "core"
+    assert fmt["module_version"] == 1
+
+
+def test_parse_wasm_bytes_detects_non_core_version_as_possible_component():
+    report = parse_wasm_bytes(
+        b"\x00asm\x0a\x00\x00\x00",
+        filename="possible_component.wasm",
+    )
+
+    fmt = report["analysis"]["detections"]["format"]
+    assert fmt["kind"] == "possible-component"
+    assert "non_core_version" in fmt["signals"]
+
+    finding_ids = {f["id"] for f in report["analysis"]["findings"]}
+    assert "WASM-FMT-005" in finding_ids
+
+
 def test_parse_wasm_file_profiles_indirect_control_flow():
     report = parse_wasm_file(_fixture_path("call_indirect.wasm"))
 
@@ -119,6 +159,7 @@ def test_parse_wasm_bytes_reports_parse_errors():
     assert report["module_version"] is None
     assert report["errors"]
     assert "Bad magic value" in report["errors"][0]
+    assert report["analysis"]["detections"]["format"]["kind"] == "invalid-core"
 
 
 def test_parse_wasm_file_json_handles_read_errors(tmp_path):

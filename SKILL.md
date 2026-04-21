@@ -87,6 +87,11 @@ Use with `--json` and/or `--json-out` when you want only the high-level triage l
 - best for policy engines, SOC triage, and compact evidence capture,
 - invalid on its own and must be paired with `--json` or `--json-out`.
 
+When triaging host/runtime assumptions, inspect:
+
+- `analysis.detections.wasi` to confirm whether imports indicate WASI (`preview1`, `preview2-like`, or `legacy`),
+- `analysis.detections.format` to quickly identify non-core or parse-incompatible binaries.
+
 ## Security-focused usage patterns
 
 1. Start with `--headers` to understand attack surface quickly.
@@ -94,12 +99,14 @@ Use with `--json` and/or `--json-out` when you want only the high-level triage l
 3. Use `-d` for suspicious functions or proposal-heavy modules.
 4. Use `--json` or `--json-out` for reproducible evidence capture.
 5. Use `--analysis-only` when the full decode is too verbose for the immediate review task.
+6. For runtime compatibility checks, verify `analysis.detections.wasi` and `analysis.detections.format` before deeper policy decisions.
 
 ## Output semantics that matter
 
 - Function/global/table/memory/tag indices are module-global.
 - Imported entities shift indices for locally-defined entries.
 - Errors from malformed binaries are reported in structured error fields rather than raising by default in library flows.
+- WASI detection is import-based; this tool parses WASI modules but does not execute WASI syscalls.
 
 ## Practical command set
 

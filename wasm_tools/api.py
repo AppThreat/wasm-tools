@@ -15,6 +15,7 @@ _HIGH_RISK_FINDING_WEIGHTS = {
     "WASM-CFG-002": 25,
     "WASM-DOS-003": 30,
     "WASM-LOOP-004": 15,
+    "WASM-FMT-005": 10,
 }
 
 
@@ -277,7 +278,14 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
             if tg is not None
         ]
 
-        analysis = self._build_analysis(functions, imports, data_segments)
+        analysis = self._build_analysis(
+            functions=functions,
+            imports=imports,
+            data_segments=data_segments,
+            sections=self.sections,
+            module_version=self.module_version,
+            errors=self.errors,
+        )
 
         return {
             "file": self.filename,
@@ -305,6 +313,9 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
         functions: list[dict[str, Any]],
         imports: list[dict[str, Any]],
         data_segments: list[dict[str, Any]],
+        sections: list[dict[str, Any]],
+        module_version: int | None,
+        errors: list[str],
     ) -> dict[str, Any]:
         op_counts: dict[str, int] = {}
         loop_max_depth = 0
@@ -388,6 +399,12 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
                     table_mutation_funcs.add(fn.get("index", -1))
 
         capabilities = sorted(self._capabilities_from_imports(imports))
+        wasi_detection = self._wasi_signals_from_imports(imports)
+        format_detection = self._format_signals(
+            module_version=module_version,
+            sections=sections,
+            errors=errors,
+        )
         findings = self._build_findings(
             capabilities=capabilities,
             memory_grow_ops=memory_grow_ops,
@@ -401,6 +418,7 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
             dynamic_funcs=dynamic_funcs,
             table_mutation_funcs=table_mutation_funcs,
             loop_memory_funcs=loop_memory_funcs,
+            format_detection=format_detection,
         )
 
         cap_risk = {
@@ -429,6 +447,10 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
                 "risk_tier": _tier_from_score(risk_score),
                 "finding_count": len(findings),
             },
+            "detections": {
+                "wasi": wasi_detection,
+                "format": format_detection,
+            },
             "capabilities": capabilities,
             "profiles": {
                 "memory": {
@@ -450,6 +472,82 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
                 },
             },
             "findings": findings,
+        }
+
+    def _wasi_signals_from_imports(
+        self, imports: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        modules = sorted(
+            {
+                str(imp.get("module", ""))
+                for imp in imports
+                if str(imp.get("module", "")).startswith("wasi")
+            }
+        )
+        import_count = sum(
+            1 for imp in imports if str(imp.get("module", "")).startswith("wasi")
+        )
+
+        variants: list[str] = []
+        if "wasi_snapshot_preview1" in modules:
+            variants.append("preview1")
+        if any(module.startswith("wasi:") for module in modules):
+            variants.append("preview2-like")
+        if any(module == "wasi_unstable" for module in modules):
+            variants.append("legacy")
+
+        confidence = "high" if modules else "none"
+        return {
+            "detected": bool(modules),
+            "confidence": confidence,
+            "import_modules": modules,
+            "import_count": import_count,
+            "variants": variants,
+        }
+
+    def _format_signals(
+        self,
+        module_version: int | None,
+        sections: list[dict[str, Any]],
+        errors: list[str],
+    ) -> dict[str, Any]:
+        signals: list[str] = []
+        custom_names = {
+            str(sec.get("name", "")) for sec in sections if int(sec.get("id", -1)) == 0
+        }
+
+        if module_version is None:
+            signals.append("missing_module_version")
+        elif module_version != 1:
+            signals.append("non_core_version")
+
+        # Common names seen in component-oriented binaries and toolchains.
+        if {"component-type", "producers", "target_features"}.intersection(
+            custom_names
+        ):
+            signals.append("component_or_toolchain_custom_section")
+
+        if errors:
+            signals.append("parse_errors")
+
+        if module_version != 1 and errors:
+            kind = "invalid-core"
+            confidence = "high"
+        elif module_version != 1:
+            kind = "possible-component"
+            confidence = "medium"
+        elif errors:
+            kind = "invalid-core"
+            confidence = "medium"
+        else:
+            kind = "core"
+            confidence = "high"
+
+        return {
+            "kind": kind,
+            "confidence": confidence,
+            "signals": sorted(set(signals)),
+            "module_version": module_version,
         }
 
     def _capabilities_from_imports(self, imports: list[dict[str, Any]]) -> set[str]:
@@ -481,6 +579,27 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
                     capabilities.add("process.terminate")
                 if name in {"clock_time_get", "poll_oneoff"}:
                     capabilities.add("clock.high_res")
+            elif module == "wasi_unstable":
+                if name.startswith("fd_"):
+                    capabilities.add("fs.io")
+                if name.startswith("path_"):
+                    capabilities.add("fs.path")
+                if name == "proc_exit":
+                    capabilities.add("process.terminate")
+            elif module.startswith("wasi:"):
+                # Preview2-style namespaces expose capability intent in names.
+                if any(token in name for token in ("filesystem", "path", "descriptor")):
+                    capabilities.add("fs.path")
+                if any(token in name for token in ("read", "write", "stream")):
+                    capabilities.add("fs.io")
+                if any(token in name for token in ("socket", "network")):
+                    capabilities.add("network")
+                if "random" in name:
+                    capabilities.add("crypto.random")
+                if "exit" in name or "terminate" in name:
+                    capabilities.add("process.terminate")
+                if "clock" in name:
+                    capabilities.add("clock.high_res")
 
             if module in {"env", "wbg", "js"}:
                 if any(token in name for token in ("log", "print")):
@@ -500,6 +619,7 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
         memory_grow_ops: int = kwargs["memory_grow_ops"]
         loop_memory_ops: int = kwargs["loop_memory_ops"]
         loop_memory_funcs: set[int] = kwargs["loop_memory_funcs"]
+        format_detection: dict[str, Any] = kwargs["format_detection"]
         loop_max_depth: int = kwargs["loop_max_depth"]
 
         findings: list[dict[str, Any]] = []
@@ -563,6 +683,22 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
                 }
             )
 
+        if format_detection.get("kind") in {"possible-component", "invalid-core"}:
+            findings.append(
+                {
+                    "id": "WASM-FMT-005",
+                    "title": "Module format may be non-core or parse-incompatible",
+                    "severity": "medium",
+                    "confidence": format_detection.get("confidence", "medium"),
+                    "evidence": {
+                        "kind": format_detection.get("kind"),
+                        "signals": format_detection.get("signals", []),
+                        "module_version": format_detection.get("module_version"),
+                    },
+                    "remediation": "Validate the artifact type and use a component-aware parser for component-model binaries.",
+                }
+            )
+
         return findings
 
 
@@ -595,6 +731,21 @@ def parse_wasm_file(path: str) -> dict[str, Any]:
             "functions": [],
             "analysis": {
                 "summary": {"risk_score": 0, "risk_tier": "none", "finding_count": 0},
+                "detections": {
+                    "wasi": {
+                        "detected": False,
+                        "confidence": "none",
+                        "import_modules": [],
+                        "import_count": 0,
+                        "variants": [],
+                    },
+                    "format": {
+                        "kind": "invalid-core",
+                        "confidence": "high",
+                        "signals": ["file_read_error"],
+                        "module_version": None,
+                    },
+                },
                 "capabilities": [],
                 "profiles": {},
                 "findings": [],
