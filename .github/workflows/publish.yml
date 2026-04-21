@@ -1,0 +1,84 @@
+name: Upload Package
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+permissions: {}
+
+jobs:
+  test:
+    name: Test before publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: '3.13'
+
+      - name: Install and test
+        run: |
+          pip install -e ".[dev]"
+          pytest -q
+
+  pypi:
+    name: Publish to PyPI
+    runs-on: ubuntu-latest
+    needs: test
+    environment: pypi
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: '3.13'
+
+      - name: Install poetry
+        run: |
+          pipx install poetry
+          pipx ensurepath
+
+      - name: Verify pyproject.toml version matches tag
+        run: |
+          poetry install --no-cache --all-groups --all-extras
+          toml_version=$(echo "v"$(poetry version -s))
+          if [[ $toml_version != $(echo $GITHUB_REF | cut -d / -f 3) ]]; then
+            echo "pyproject.toml version ($toml_version) does not match tag ($GITHUB_REF)."
+            exit 1
+          fi
+
+      - name: Build dist
+        run: poetry build --no-cache
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b  # v1.14.0
+
+      - name: Generate SBOM with cdxgen
+        run: |
+          npm install -g @cyclonedx/cdxgen
+          cdxgen -t python -o bom.json $(pwd) -p
+
+      - name: Upload SBOM to release
+        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda  # v3.0.0
+        with:
+          files: |
+            bom.json
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

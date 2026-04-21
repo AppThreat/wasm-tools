@@ -1,0 +1,45 @@
+[project]
+name = "wasm-tools"
+version = "0.1.0"
+description = "A pure-Python WebAssembly binary parser, disassembler, and structured analysis library"
+authors = [
+    {name = "Team AppThreat",email = "cloud@appthreat.com"}
+]
+license = {text = "MIT"}
+readme = "README.md"
+requires-python = ">=3.10"
+keywords = ["wasm", "binary", "wabt", "webassembly", "security", "pentesting", "red teaming"]
+classifiers = [
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Intended Audience :: Developers",
+  "Operating System :: OS Independent",
+  "Topic :: Security",
+  "Topic :: Utilities",
+]
+
+dependencies = [
+]
+
+[project.urls]
+"Homepage" = "https://github.com/appthreat/wasm-tools"
+"Bug Tracker" = "https://github.com/appthreat/wasm-tools/issues"
+
+[project.scripts]
+wasm-tools = "wasm_tools.cli:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=9.0.3",
+    "pytest-cov>=7.1.0"
+]
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.pytest.ini_options]
+addopts = "--verbose --cov-append --cov-report term --cov wasm_tools"
