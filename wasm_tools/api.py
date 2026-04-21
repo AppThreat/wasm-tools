@@ -10,6 +10,24 @@ from .parser import BinaryReader
 from .visitor import BinaryReaderNop, BinaryReaderObjdumpPrepass
 
 
+_HIGH_RISK_FINDING_WEIGHTS = {
+    "WASM-CAP-001": 30,
+    "WASM-CFG-002": 25,
+    "WASM-DOS-003": 30,
+    "WASM-LOOP-004": 15,
+}
+
+
+def _tier_from_score(score: int) -> str:
+    if score >= 70:
+        return "high"
+    if score >= 40:
+        return "medium"
+    if score > 0:
+        return "low"
+    return "none"
+
+
 class _BinaryReaderJsonCollector(BinaryReaderNop):
     """Collect parser callbacks into a structured report dictionary."""
 
@@ -216,6 +234,8 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
             for tg in state.tags if tg is not None
         ]
 
+        analysis = self._build_analysis(functions, imports, data_segments)
+
         return {
             "file": self.filename,
             "module_version": self.module_version,
@@ -233,8 +253,263 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
             "elements": elements,
             "tags": tags,
             "start_function": state.start_function,
+            "analysis": analysis,
             "errors": self.errors,
         }
+
+    def _build_analysis(
+        self,
+        functions: list[dict[str, Any]],
+        imports: list[dict[str, Any]],
+        data_segments: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        op_counts: dict[str, int] = {}
+        loop_max_depth = 0
+        loop_memory_ops = 0
+        loop_branch_ops = 0
+        indirect_call_ops = 0
+        table_mutation_ops = 0
+        memory_grow_ops = 0
+        bulk_memory_ops = 0
+        memory_access_ops = 0
+        dynamic_funcs: set[int] = set()
+        table_mutation_funcs: set[int] = set()
+        loop_memory_funcs: set[int] = set()
+
+        block_openers = {"block", "loop", "if", "try_table"}
+        table_mutators = {
+            "table.set",
+            "table.grow",
+            "table.fill",
+            "table.copy",
+            "table.init",
+            "elem.drop",
+        }
+        bulk_memory = {"memory.init", "memory.copy", "memory.fill", "data.drop"}
+
+        for fn in functions:
+            active_loops = 0
+            block_stack: list[str] = []
+            for ins in fn.get("instructions", []):
+                op = ins.get("opcode", "")
+                op_counts[op] = op_counts.get(op, 0) + 1
+
+                if op in block_openers:
+                    block_stack.append(op)
+                    if op == "loop":
+                        active_loops += 1
+                        loop_max_depth = max(loop_max_depth, active_loops)
+                elif op == "end" and block_stack:
+                    if block_stack.pop() == "loop":
+                        active_loops = max(0, active_loops - 1)
+
+                is_memory_access = (
+                    op.startswith("i32.load")
+                    or op.startswith("i64.load")
+                    or op.startswith("f32.load")
+                    or op.startswith("f64.load")
+                    or op.startswith("v128.load")
+                    or op.startswith("i32.store")
+                    or op.startswith("i64.store")
+                    or op.startswith("f32.store")
+                    or op.startswith("f64.store")
+                    or op.startswith("v128.store")
+                    or op.startswith("memory.")
+                )
+                if is_memory_access:
+                    memory_access_ops += 1
+                    if active_loops > 0:
+                        loop_memory_ops += 1
+                        loop_memory_funcs.add(fn.get("index", -1))
+
+                if op in {"br", "br_if", "br_table"} and active_loops > 0:
+                    loop_branch_ops += 1
+
+                if op == "memory.grow":
+                    memory_grow_ops += 1
+
+                if op in bulk_memory:
+                    bulk_memory_ops += 1
+
+                if op in {"call_indirect", "return_call_indirect", "call_ref", "return_call_ref"}:
+                    indirect_call_ops += 1
+                    dynamic_funcs.add(fn.get("index", -1))
+
+                if op in table_mutators:
+                    table_mutation_ops += 1
+                    table_mutation_funcs.add(fn.get("index", -1))
+
+        capabilities = sorted(self._capabilities_from_imports(imports))
+        findings = self._build_findings(
+            capabilities=capabilities,
+            memory_grow_ops=memory_grow_ops,
+            bulk_memory_ops=bulk_memory_ops,
+            memory_access_ops=memory_access_ops,
+            loop_max_depth=loop_max_depth,
+            loop_memory_ops=loop_memory_ops,
+            loop_branch_ops=loop_branch_ops,
+            indirect_call_ops=indirect_call_ops,
+            table_mutation_ops=table_mutation_ops,
+            dynamic_funcs=dynamic_funcs,
+            table_mutation_funcs=table_mutation_funcs,
+            loop_memory_funcs=loop_memory_funcs,
+        )
+
+        cap_risk = {
+            "fs.path": 10,
+            "fs.io": 8,
+            "network": 12,
+            "process.terminate": 8,
+            "crypto.random": 2,
+            "clock.high_res": 4,
+            "host.logging": 2,
+            "host.memory": 3,
+            "host.table": 3,
+            "host.global": 2,
+            "host.tag": 2,
+            "js.host": 6,
+        }
+        capability_score = sum(cap_risk.get(cap, 0) for cap in capabilities)
+        findings_score = sum(_HIGH_RISK_FINDING_WEIGHTS.get(f["id"], 5) for f in findings)
+        risk_score = min(100, capability_score + findings_score)
+
+        return {
+            "summary": {
+                "risk_score": risk_score,
+                "risk_tier": _tier_from_score(risk_score),
+                "finding_count": len(findings),
+            },
+            "capabilities": capabilities,
+            "profiles": {
+                "memory": {
+                    "memory_access_ops": memory_access_ops,
+                    "memory_grow_ops": memory_grow_ops,
+                    "bulk_memory_ops": bulk_memory_ops,
+                    "data_segment_total_bytes": sum(ds.get("size", 0) for ds in data_segments),
+                },
+                "control_flow": {
+                    "indirect_call_ops": indirect_call_ops,
+                    "table_mutation_ops": table_mutation_ops,
+                },
+                "compute": {
+                    "max_loop_depth": loop_max_depth,
+                    "loop_memory_ops": loop_memory_ops,
+                    "loop_branch_ops": loop_branch_ops,
+                },
+            },
+            "findings": findings,
+        }
+
+    def _capabilities_from_imports(self, imports: list[dict[str, Any]]) -> set[str]:
+        capabilities: set[str] = set()
+        for imp in imports:
+            module = str(imp.get("module", ""))
+            name = str(imp.get("name", ""))
+            kind = str(imp.get("kind", ""))
+
+            if kind == "memory":
+                capabilities.add("host.memory")
+            elif kind == "table":
+                capabilities.add("host.table")
+            elif kind == "global":
+                capabilities.add("host.global")
+            elif kind == "tag":
+                capabilities.add("host.tag")
+
+            if module == "wasi_snapshot_preview1":
+                if name.startswith("path_"):
+                    capabilities.add("fs.path")
+                if name.startswith("fd_"):
+                    capabilities.add("fs.io")
+                if name.startswith("sock_"):
+                    capabilities.add("network")
+                if name == "random_get":
+                    capabilities.add("crypto.random")
+                if name == "proc_exit":
+                    capabilities.add("process.terminate")
+                if name in {"clock_time_get", "poll_oneoff"}:
+                    capabilities.add("clock.high_res")
+
+            if module in {"env", "wbg", "js"}:
+                if any(token in name for token in ("log", "print")):
+                    capabilities.add("host.logging")
+                if "abort" in name or name == "proc_exit":
+                    capabilities.add("process.terminate")
+            if module in {"wbg", "js"}:
+                capabilities.add("js.host")
+        return capabilities
+
+    def _build_findings(self, **kwargs: Any) -> list[dict[str, Any]]:
+        capabilities: list[str] = kwargs["capabilities"]
+        indirect_call_ops: int = kwargs["indirect_call_ops"]
+        table_mutation_ops: int = kwargs["table_mutation_ops"]
+        dynamic_funcs: set[int] = kwargs["dynamic_funcs"]
+        table_mutation_funcs: set[int] = kwargs["table_mutation_funcs"]
+        memory_grow_ops: int = kwargs["memory_grow_ops"]
+        loop_memory_ops: int = kwargs["loop_memory_ops"]
+        loop_memory_funcs: set[int] = kwargs["loop_memory_funcs"]
+        loop_max_depth: int = kwargs["loop_max_depth"]
+
+        findings: list[dict[str, Any]] = []
+
+        if {"fs.path", "network"}.issubset(set(capabilities)):
+            findings.append(
+                {
+                    "id": "WASM-CAP-001",
+                    "title": "Filesystem and network host capabilities are both imported",
+                    "severity": "high",
+                    "confidence": "high",
+                    "evidence": {"capabilities": ["fs.path", "network"]},
+                    "remediation": "Review sandbox policy and restrict host imports to least privilege.",
+                }
+            )
+
+        if indirect_call_ops > 0 and table_mutation_ops > 0:
+            findings.append(
+                {
+                    "id": "WASM-CFG-002",
+                    "title": "Dynamic dispatch surface includes mutable table operations",
+                    "severity": "high",
+                    "confidence": "medium",
+                    "evidence": {
+                        "indirect_call_ops": indirect_call_ops,
+                        "table_mutation_ops": table_mutation_ops,
+                        "dynamic_funcs": sorted(i for i in dynamic_funcs if i >= 0),
+                        "table_mutation_funcs": sorted(i for i in table_mutation_funcs if i >= 0),
+                    },
+                    "remediation": "Prefer immutable dispatch tables or add strict index validation around table mutations.",
+                }
+            )
+
+        if memory_grow_ops > 0 and loop_memory_ops > 0:
+            findings.append(
+                {
+                    "id": "WASM-DOS-003",
+                    "title": "Memory growth occurs in loop context",
+                    "severity": "high",
+                    "confidence": "medium",
+                    "evidence": {
+                        "memory_grow_ops": memory_grow_ops,
+                        "loop_memory_ops": loop_memory_ops,
+                        "functions": sorted(i for i in loop_memory_funcs if i >= 0),
+                    },
+                    "remediation": "Apply growth limits and add explicit loop bounds when executing untrusted inputs.",
+                }
+            )
+
+        if loop_max_depth >= 3:
+            findings.append(
+                {
+                    "id": "WASM-LOOP-004",
+                    "title": "Deep loop nesting increases computational amplification risk",
+                    "severity": "medium",
+                    "confidence": "medium",
+                    "evidence": {"max_loop_depth": loop_max_depth},
+                    "remediation": "Add runtime fuel/step limits or watchdog timeouts for untrusted modules.",
+                }
+            )
+
+        return findings
 
 
 def parse_wasm_bytes(data: bytes, filename: str = "<memory>") -> dict[str, Any]:
@@ -264,6 +539,12 @@ def parse_wasm_file(path: str) -> dict[str, Any]:
             "sections": [],
             "function_count": 0,
             "functions": [],
+            "analysis": {
+                "summary": {"risk_score": 0, "risk_tier": "none", "finding_count": 0},
+                "capabilities": [],
+                "profiles": {},
+                "findings": [],
+            },
             "errors": [f"Error reading {path}: {exc}"],
         }
 

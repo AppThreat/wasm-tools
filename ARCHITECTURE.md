@@ -248,6 +248,13 @@ The prepass needs to run first because the `name` custom section appears after t
 
 `wasm_tools/api.py` provides `_BinaryReaderJsonCollector`, a non-printing visitor that accumulates decoded data into Python dictionaries. At the end of the second pass, `build_report()` assembles a single dict from the in-progress function table and the fully-populated `ObjdumpState`. The result is directly serialisable with `json.dumps`.
 
+The collector also computes an `analysis` block for security triage. This layer is heuristic and does not change parsing behavior.
+
+- **Capability inference** maps imports into higher-level host capabilities such as filesystem, network, process termination, random, and JS host interaction.
+- **Behavior profiles** summarize memory, control-flow, and compute complexity signals from decoded opcode streams.
+- **Findings** are stable-id rule checks (`WASM-CAP-001`, `WASM-CFG-002`, `WASM-DOS-003`, `WASM-LOOP-004`) with severity, confidence, evidence, and remediation text.
+- **Risk scoring** combines capability and finding weights into a bounded 0-100 score and a tier (`none`, `low`, `medium`, `high`).
+
 The public API functions (`parse_wasm_bytes`, `parse_wasm_file`, `parse_wasm_bytes_json`, `parse_wasm_file_json`) wrap the two-pass pipeline and handle OS errors at the file read level.
 
 ---

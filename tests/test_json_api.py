@@ -62,6 +62,41 @@ def test_parse_wasm_file_uses_module_global_function_indices_with_imports():
     assert report["functions"][0]["index"] == 1
 
 
+def test_parse_wasm_file_includes_security_analysis_summary():
+    report = parse_wasm_file(_fixture_path("simple_add.wasm"))
+
+    assert "analysis" in report
+    assert report["analysis"]["summary"]["risk_score"] >= 0
+    assert report["analysis"]["summary"]["risk_tier"] in {"none", "low", "medium", "high"}
+    assert isinstance(report["analysis"]["findings"], list)
+
+
+def test_parse_wasm_file_detects_wasi_capability_combo_risk():
+    report = parse_wasm_file(_fixture_path("wasi_capabilities.wasm"))
+
+    caps = set(report["analysis"]["capabilities"])
+    assert "fs.path" in caps
+    assert "network" in caps
+    finding_ids = {f["id"] for f in report["analysis"]["findings"]}
+    assert "WASM-CAP-001" in finding_ids
+
+
+def test_parse_wasm_file_profiles_indirect_control_flow():
+    report = parse_wasm_file(_fixture_path("call_indirect.wasm"))
+
+    cf = report["analysis"]["profiles"]["control_flow"]
+    assert cf["indirect_call_ops"] >= 1
+
+
+def test_parse_wasm_file_detects_loop_growth_dos_signal():
+    report = parse_wasm_file(_fixture_path("dos_growth_loop.wasm"))
+
+    finding_ids = {f["id"] for f in report["analysis"]["findings"]}
+    assert "WASM-DOS-003" in finding_ids
+    compute = report["analysis"]["profiles"]["compute"]
+    assert compute["loop_memory_ops"] >= 1
+
+
 def test_parse_wasm_bytes_json_includes_unicode_content():
     raw = _fixture_bytes("unicode_names.wasm")
     json_text = parse_wasm_bytes_json(raw, filename="unicode_names.wasm")

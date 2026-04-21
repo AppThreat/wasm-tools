@@ -221,6 +221,24 @@ Each instruction entry contains:
 
 This shape is covered by `tests/test_json_api.py`.
 
+### High-level security analysis
+
+The JSON report includes an `analysis` object designed for analyst triage.
+
+- `summary`: overall `risk_score`, `risk_tier`, and `finding_count`,
+- `capabilities`: inferred host capability tags from imports (for example `fs.path`, `network`, `process.terminate`),
+- `profiles.memory`: memory access density, `memory.grow`, bulk-memory activity, and total data segment bytes,
+- `profiles.control_flow`: dynamic dispatch metrics (`call_indirect`, `call_ref`) and table mutation counts,
+- `profiles.compute`: loop depth and loop-contained memory/control-flow pressure,
+- `findings`: actionable rule-based results with stable ids and remediation guidance.
+
+Current built-in finding ids:
+
+- `WASM-CAP-001`: filesystem and network host capabilities imported together.
+- `WASM-CFG-002`: indirect call surface combined with mutable table operations.
+- `WASM-DOS-003`: memory growth in loop context.
+- `WASM-LOOP-004`: deep loop nesting amplification signal.
+
 ## Error handling model
 
 The parser does not re-raise `WasmParseError` by default. `BinaryReader.read_module()` catches parse exceptions and forwards the message to `delegate.on_error(...)` when that callback exists.
@@ -255,7 +273,9 @@ Representative fixtures include:
 - `bulk_memory.wat` for `memory.init`, `data.drop`, and `memory.fill`,
 - `complex_flow.wat` for mixed control flow, memory, direct calls, and indirect calls,
 - `unicode_names.wat` for Unicode content,
-- `adversarial_ops.wat` for edge immediates and `br_table`.
+- `adversarial_ops.wat` for edge immediates and `br_table`,
+- `wasi_capabilities.wat` for host capability/risk analysis checks,
+- `dos_growth_loop.wat` for loop + `memory.grow` DoS heuristics.
 
 These fixtures are used in `tests/test_e2e.py` to validate the disassembly output and in `tests/test_json_api.py` to validate the structured API.
 
@@ -267,6 +287,7 @@ The repository is a practical decoder, not a full specification implementation:
 - Text-format (`.wat`) input is handled by external WABT tooling only.
 - The custom `name` section decodes subsections 1 (function names) and 2 (local names); other subsections such as label names are skipped.
 - Some rarely used init-expression forms in element and data segments fall back to a hex scan rather than full expression decoding.
+- The `analysis` layer is heuristic by design and is intended for triage, not formal proof of exploitability.
 - The library ships with no runtime dependencies. The `specification/` directory contains only reference material and is not included in the PyPI package.
 
 ## Development workflow
