@@ -186,10 +186,13 @@ class BinaryReader:
     def read_limits(self) -> Tuple[int, Any, bool]:
         """Return (minimum, maximum_or_None, is_64)."""
         flag = self.read_u8()
-        is_64 = flag in (0x04, 0x05)
+        # Limits flags use bitfields:
+        # bit0 => has max, bit1 => shared, bit2 => 64-bit index type.
+        has_max = bool(flag & 0x01)
+        is_64 = bool(flag & 0x04)
         minimum = self.read_leb128(max_bits=64)
         maximum = None
-        if flag in (0x01, 0x05):
+        if has_max:
             maximum = self.read_leb128(max_bits=64)
         return minimum, maximum, is_64
 
@@ -694,7 +697,8 @@ class BinaryReader:
 
             elif imm_type == ImmType.MEMARG:
                 align = self.read_leb128(max_bits=32)
-                mem_offset = self.read_leb128(max_bits=32)
+                # memory64 extends memarg offsets from u32 to u64.
+                mem_offset = self.read_leb128(max_bits=64)
                 if hasattr(self.delegate, "on_opcode_uint32_uint32"):
                     self.delegate.on_opcode_uint32_uint32(align, mem_offset)
 
@@ -782,7 +786,7 @@ class BinaryReader:
 
             elif imm_type == ImmType.MEMARG_LANE:
                 align = self.read_leb128(max_bits=32)
-                mem_offset = self.read_leb128(max_bits=32)
+                mem_offset = self.read_leb128(max_bits=64)
                 lane = self.read_u8()
                 if hasattr(self.delegate, "on_opcode_memarg_lane"):
                     self.delegate.on_opcode_memarg_lane(align, mem_offset, lane)

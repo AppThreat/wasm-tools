@@ -9,6 +9,16 @@ _EXTRA_FLAGS: dict = {
     "exceptions_basic.wat": ["--enable-exceptions"],
     "threads_basic.wat": ["--enable-threads"],
     "gc_basic.wat": ["--enable-gc"],
+    "call_refs.wat": ["--enable-function-references", "--enable-gc"],
+    "load64.wat": ["--enable-memory64"],
+    "memory64_shared.wat": ["--enable-memory64", "--enable-threads"],
+    "table_init64.wat": ["--enable-memory64"],
+    "float_memory64.wat": ["--enable-memory64"],
+    "bulk64.wat": ["--enable-memory64"],
+    "memory_trap64.wat": ["--enable-memory64"],
+    "table_fill64.wat": ["--enable-memory64"],
+    "table_set64.wat": ["--enable-memory64"],
+    "table_size64.wat": ["--enable-memory64"],
 }
 
 

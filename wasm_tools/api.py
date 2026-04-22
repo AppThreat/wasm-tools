@@ -141,6 +141,14 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
         """Capture parser errors for programmatic callers."""
         self.errors.append(message)
 
+    def on_opcode_lane_idx(self, lane: int) -> None:
+        """Finalize lane-index SIMD opcodes."""
+        self._append_immediates(lane)
+
+    def on_opcode_memarg_lane(self, align: int, mem_offset: int, lane: int) -> None:
+        """Finalize SIMD memory lane opcodes with align, offset, and lane immediates."""
+        self._append_immediates(align, mem_offset, lane)
+
     def _append_immediates(self, *values: Any) -> None:
         """Append immediate values and finalize the current instruction."""
         if self._pending_instruction is None:
@@ -186,6 +194,7 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
                     rec["limits"] = {
                         "min": imp.table_limits.minimum,
                         "max": imp.table_limits.maximum,
+                        "is_64": imp.table_limits.is_64,
                     }
             elif imp.kind == "memory":
                 if imp.mem_limits:
@@ -227,7 +236,11 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
             {
                 "index": t.index,
                 "ref_type": t.ref_type,
-                "limits": {"min": t.limits.minimum, "max": t.limits.maximum},
+                "limits": {
+                    "min": t.limits.minimum,
+                    "max": t.limits.maximum,
+                    "is_64": t.limits.is_64,
+                },
             }
             for t in state.tables
             if t is not None

@@ -242,3 +242,260 @@ def test_e2e_bulk_memory_fixture(capsys):
     assert "memory.init 0 0" in stdout
     assert "data.drop 0" in stdout
     assert "memory.fill 0" in stdout
+
+
+def test_e2e_labels_control_fixture(capsys):
+    data = get_wasm("labels_control.wasm")
+    options = ObjdumpOptions(mode=ObjdumpMode.PREPASS)
+    state = ObjdumpState()
+
+    BinaryReader(data, BinaryReaderObjdumpPrepass(data, options, state)).read_module()
+    options.mode = ObjdumpMode.DISASSEMBLE
+    BinaryReader(
+        data, BinaryReaderObjdumpDisassemble(data, options, state)
+    ).read_module()
+
+    stdout = capsys.readouterr().out
+
+    assert "Code Disassembly:" in stdout
+    assert "func[4]:" in stdout
+    # Label names are lowered to branch depths in the binary encoding.
+    assert "br 0" in stdout
+    assert "br 2" in stdout
+    assert "br_table 4 0 1 2 3" in stdout
+    assert "i32.mul" in stdout
+
+
+def test_e2e_call_refs_fixture(capsys):
+    data = get_wasm("call_refs.wasm")
+    options = ObjdumpOptions(mode=ObjdumpMode.PREPASS)
+    state = ObjdumpState()
+
+    BinaryReader(data, BinaryReaderObjdumpPrepass(data, options, state)).read_module()
+    options.mode = ObjdumpMode.DISASSEMBLE
+    BinaryReader(
+        data, BinaryReaderObjdumpDisassemble(data, options, state)
+    ).read_module()
+
+    stdout = capsys.readouterr().out
+
+    assert "Code Disassembly:" in stdout
+    assert "func[5]:" in stdout
+    assert "ref.func 1" in stdout
+    assert "ref.null type[0]" in stdout
+    assert "global.get 0" in stdout
+    assert "call_ref 0" in stdout
+
+
+def test_e2e_load64_fixture(capsys):
+    data = get_wasm("load64.wasm")
+    options = ObjdumpOptions(mode=ObjdumpMode.PREPASS)
+    state = ObjdumpState()
+
+    BinaryReader(data, BinaryReaderObjdumpPrepass(data, options, state)).read_module()
+    options.mode = ObjdumpMode.DISASSEMBLE
+    BinaryReader(
+        data, BinaryReaderObjdumpDisassemble(data, options, state)
+    ).read_module()
+
+    stdout = capsys.readouterr().out
+
+    assert "Code Disassembly:" in stdout
+    assert "func[6]:" in stdout
+    assert "i32.load 2 1099511627776" in stdout
+    assert "i64.load 3 1099511627776" in stdout
+    assert "i32.store 2 1099511627776" in stdout
+    assert "call_indirect 0 0" in stdout
+    assert "memory.grow 0" in stdout
+
+
+def test_e2e_memory64_shared_fixture(capsys):
+    data = get_wasm("memory64_shared.wasm")
+    options = ObjdumpOptions(mode=ObjdumpMode.PREPASS)
+    state = ObjdumpState()
+
+    BinaryReader(data, BinaryReaderObjdumpPrepass(data, options, state)).read_module()
+    options.mode = ObjdumpMode.DISASSEMBLE
+    BinaryReader(
+        data, BinaryReaderObjdumpDisassemble(data, options, state)
+    ).read_module()
+
+    stdout = capsys.readouterr().out
+
+    assert "Code Disassembly:" in stdout
+    assert "func[1]:" in stdout
+    assert "memory.size 0" in stdout
+    assert "memory.grow 0" in stdout
+
+
+def test_e2e_table_init64_fixture(capsys):
+    data = get_wasm("table_init64.wasm")
+    options = ObjdumpOptions(mode=ObjdumpMode.PREPASS)
+    state = ObjdumpState()
+
+    BinaryReader(data, BinaryReaderObjdumpPrepass(data, options, state)).read_module()
+    options.mode = ObjdumpMode.DISASSEMBLE
+    BinaryReader(
+        data, BinaryReaderObjdumpDisassemble(data, options, state)
+    ).read_module()
+
+    stdout = capsys.readouterr().out
+
+    assert "Code Disassembly:" in stdout
+    assert "func[10]:" in stdout
+    assert "table.init 1 2" in stdout
+    assert "elem.drop 1" in stdout
+    assert "table.copy 2 2" in stdout
+    assert "call_indirect 0 2" in stdout
+
+
+def test_e2e_unreachable_fixture(capsys):
+    data = get_wasm("unreachable.wasm")
+    options = ObjdumpOptions(mode=ObjdumpMode.PREPASS)
+    state = ObjdumpState()
+
+    BinaryReader(data, BinaryReaderObjdumpPrepass(data, options, state)).read_module()
+    options.mode = ObjdumpMode.DISASSEMBLE
+    BinaryReader(
+        data, BinaryReaderObjdumpDisassemble(data, options, state)
+    ).read_module()
+
+    stdout = capsys.readouterr().out
+
+    assert "Code Disassembly:" in stdout
+    assert "func[2]:" in stdout
+    assert "unreachable" in stdout
+    assert "br_table 0 0 0" in stdout
+    assert "memory.grow 0" in stdout
+
+
+def test_e2e_float_memory64_fixture(capsys):
+    data = get_wasm("float_memory64.wasm")
+    options = ObjdumpOptions(mode=ObjdumpMode.PREPASS)
+    state = ObjdumpState()
+
+    BinaryReader(data, BinaryReaderObjdumpPrepass(data, options, state)).read_module()
+    options.mode = ObjdumpMode.DISASSEMBLE
+    BinaryReader(
+        data, BinaryReaderObjdumpDisassemble(data, options, state)
+    ).read_module()
+
+    stdout = capsys.readouterr().out
+
+    assert "Code Disassembly:" in stdout
+    assert "f32.load 2 0" in stdout
+    assert "f64.load 3 8" in stdout
+    assert "f32.store 2 0" in stdout
+    assert "f64.store 3 0" in stdout
+
+
+def test_e2e_bulk64_fixture(capsys):
+    data = get_wasm("bulk64.wasm")
+    options = ObjdumpOptions(mode=ObjdumpMode.PREPASS)
+    state = ObjdumpState()
+
+    BinaryReader(data, BinaryReaderObjdumpPrepass(data, options, state)).read_module()
+    options.mode = ObjdumpMode.DISASSEMBLE
+    BinaryReader(
+        data, BinaryReaderObjdumpDisassemble(data, options, state)
+    ).read_module()
+
+    stdout = capsys.readouterr().out
+
+    assert "memory.init 0 1" in stdout
+    assert "data.drop 1" in stdout
+    assert "memory.copy 0 0" in stdout
+    assert "memory.fill 0" in stdout
+
+
+def test_e2e_memory_trap64_fixture(capsys):
+    data = get_wasm("memory_trap64.wasm")
+    options = ObjdumpOptions(mode=ObjdumpMode.PREPASS)
+    state = ObjdumpState()
+
+    BinaryReader(data, BinaryReaderObjdumpPrepass(data, options, state)).read_module()
+    options.mode = ObjdumpMode.DISASSEMBLE
+    BinaryReader(
+        data, BinaryReaderObjdumpDisassemble(data, options, state)
+    ).read_module()
+
+    stdout = capsys.readouterr().out
+
+    assert "memory.size 0" in stdout
+    assert "memory.grow 0" in stdout
+    assert "i32.store 2 0" in stdout
+    assert "i32.load 2 0" in stdout
+
+
+def test_e2e_table_fill64_fixture(capsys):
+    data = get_wasm("table_fill64.wasm")
+    options = ObjdumpOptions(mode=ObjdumpMode.PREPASS)
+    state = ObjdumpState()
+
+    BinaryReader(data, BinaryReaderObjdumpPrepass(data, options, state)).read_module()
+    options.mode = ObjdumpMode.DISASSEMBLE
+    BinaryReader(
+        data, BinaryReaderObjdumpDisassemble(data, options, state)
+    ).read_module()
+
+    stdout = capsys.readouterr().out
+
+    assert "table.fill 0" in stdout
+    assert "table.fill 1" in stdout
+    assert "table.get 1" in stdout
+
+
+def test_e2e_table_set64_fixture(capsys):
+    data = get_wasm("table_set64.wasm")
+    options = ObjdumpOptions(mode=ObjdumpMode.PREPASS)
+    state = ObjdumpState()
+
+    BinaryReader(data, BinaryReaderObjdumpPrepass(data, options, state)).read_module()
+    options.mode = ObjdumpMode.DISASSEMBLE
+    BinaryReader(
+        data, BinaryReaderObjdumpDisassemble(data, options, state)
+    ).read_module()
+
+    stdout = capsys.readouterr().out
+
+    assert "table.get 0" in stdout
+    assert "table.get 1" in stdout
+    assert "table.set 0" in stdout
+    assert "table.set 1" in stdout
+
+
+def test_e2e_table_size64_fixture(capsys):
+    data = get_wasm("table_size64.wasm")
+    options = ObjdumpOptions(mode=ObjdumpMode.PREPASS)
+    state = ObjdumpState()
+
+    BinaryReader(data, BinaryReaderObjdumpPrepass(data, options, state)).read_module()
+    options.mode = ObjdumpMode.DISASSEMBLE
+    BinaryReader(
+        data, BinaryReaderObjdumpDisassemble(data, options, state)
+    ).read_module()
+
+    stdout = capsys.readouterr().out
+
+    assert "table.size 0" in stdout
+    assert "table.size 3" in stdout
+    assert "table.grow 0" in stdout
+    assert "table.grow 3" in stdout
+
+
+def test_e2e_simd_store64_lane_fixture(capsys):
+    data = get_wasm("simd_store64_lane.wasm")
+    options = ObjdumpOptions(mode=ObjdumpMode.PREPASS)
+    state = ObjdumpState()
+
+    BinaryReader(data, BinaryReaderObjdumpPrepass(data, options, state)).read_module()
+    options.mode = ObjdumpMode.DISASSEMBLE
+    BinaryReader(
+        data, BinaryReaderObjdumpDisassemble(data, options, state)
+    ).read_module()
+
+    stdout = capsys.readouterr().out
+
+    assert "Code Disassembly:" in stdout
+    assert "func[0]:" in stdout
+    assert "v128.store64_lane 2 1 lane=1" in stdout

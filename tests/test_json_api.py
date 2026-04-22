@@ -54,6 +54,17 @@ def test_parse_wasm_file_captures_bulk_memory_immediates():
     )
 
 
+def test_parse_wasm_file_captures_call_ref_immediates():
+    report = parse_wasm_file(_fixture_path("call_refs.wasm"))
+
+    assert report["errors"] == []
+    assert any(
+        ins["opcode"] == "call_ref" and ins["immediates"] == [0]
+        for fn in report["functions"]
+        for ins in fn["instructions"]
+    )
+
+
 def test_parse_wasm_file_uses_module_global_function_indices_with_imports():
     report = parse_wasm_file(_fixture_path("globals_imports.wasm"))
 
@@ -182,6 +193,19 @@ def test_parse_wasm_file_profiles_indirect_control_flow():
     assert cf["indirect_call_ops"] >= 1
 
 
+def test_parse_wasm_file_profiles_load64_control_flow():
+    report = parse_wasm_file(_fixture_path("load64.wasm"))
+
+    cf = report["analysis"]["profiles"]["control_flow"]
+    assert cf["indirect_call_ops"] >= 1
+
+
+def test_parse_wasm_file_profiles_memory64_shared_growth():
+    report = parse_wasm_file(_fixture_path("memory64_shared.wasm"))
+
+    assert report["analysis"]["profiles"]["memory"]["memory_grow_ops"] >= 1
+
+
 def test_parse_wasm_file_detects_loop_growth_dos_signal():
     report = parse_wasm_file(_fixture_path("dos_growth_loop.wasm"))
 
@@ -220,3 +244,189 @@ def test_parse_wasm_file_json_handles_read_errors(tmp_path):
     assert parsed["errors"]
     assert parsed["function_count"] == 0
     assert parsed["analysis"]["detections"]["js_interface"]["detected"] is False
+
+
+def test_parse_wasm_file_captures_load64_memory_profile_and_immediates():
+    report = parse_wasm_file(_fixture_path("load64.wasm"))
+
+    assert report["errors"] == []
+    assert report["memories"][0]["limits"]["is_64"] is True
+    assert any(
+        ins["opcode"] == "i64.load" and ins["immediates"] == [3, 1099511627776]
+        for fn in report["functions"]
+        for ins in fn["instructions"]
+    )
+    assert any(
+        ins["opcode"] == "i32.store" and ins["immediates"] == [2, 1099511627776]
+        for fn in report["functions"]
+        for ins in fn["instructions"]
+    )
+
+
+def test_parse_wasm_file_captures_memory64_shared_limits():
+    report = parse_wasm_file(_fixture_path("memory64_shared.wasm"))
+
+    assert report["errors"] == []
+    assert report["memories"][0]["limits"] == {"min": 1, "max": 3, "is_64": True}
+
+
+def test_parse_wasm_file_captures_table_init64_tables_and_immediates():
+    report = parse_wasm_file(_fixture_path("table_init64.wasm"))
+
+    assert report["errors"] == []
+    assert report["tables"][2]["limits"] == {"min": 30, "max": 30, "is_64": True}
+    assert any(
+        ins["opcode"] == "table.init" and ins["immediates"] == [1, 2]
+        for fn in report["functions"]
+        for ins in fn["instructions"]
+    )
+    assert any(
+        ins["opcode"] == "table.copy" and ins["immediates"] == [2, 2]
+        for fn in report["functions"]
+        for ins in fn["instructions"]
+    )
+    assert any(
+        ins["opcode"] == "call_indirect" and ins["immediates"] == [0, 2]
+        for fn in report["functions"]
+        for ins in fn["instructions"]
+    )
+
+
+def test_parse_wasm_file_captures_unreachable_instruction_density():
+    report = parse_wasm_file(_fixture_path("unreachable.wasm"))
+
+    assert report["errors"] == []
+    unreachable_ops = sum(
+        1
+        for fn in report["functions"]
+        for ins in fn["instructions"]
+        if ins["opcode"] == "unreachable"
+    )
+    assert unreachable_ops >= 40
+    assert any(
+        ins["opcode"] == "memory.grow" and ins["immediates"] == [0]
+        for fn in report["functions"]
+        for ins in fn["instructions"]
+    )
+    assert report["analysis"]["profiles"]["control_flow"]["indirect_call_ops"] >= 4
+
+
+def test_parse_wasm_file_captures_float_memory64_immediates():
+    report = parse_wasm_file(_fixture_path("float_memory64.wasm"))
+
+    assert report["errors"] == []
+    assert report["memories"][0]["limits"]["is_64"] is True
+    assert any(
+        ins["opcode"] == "f64.load" and ins["immediates"] == [3, 8]
+        for fn in report["functions"]
+        for ins in fn["instructions"]
+    )
+    assert any(
+        ins["opcode"] == "f32.store" and ins["immediates"] == [2, 0]
+        for fn in report["functions"]
+        for ins in fn["instructions"]
+    )
+
+
+def test_parse_wasm_file_captures_bulk64_immediates_and_profiles():
+    report = parse_wasm_file(_fixture_path("bulk64.wasm"))
+
+    assert report["errors"] == []
+    assert report["memories"][0]["limits"]["is_64"] is True
+    assert any(
+        ins["opcode"] == "memory.init" and ins["immediates"] == [0, 1]
+        for fn in report["functions"]
+        for ins in fn["instructions"]
+    )
+    assert any(
+        ins["opcode"] == "memory.copy" and ins["immediates"] == [0, 0]
+        for fn in report["functions"]
+        for ins in fn["instructions"]
+    )
+    assert any(
+        ins["opcode"] == "memory.fill" and ins["immediates"] == [0]
+        for fn in report["functions"]
+        for ins in fn["instructions"]
+    )
+    assert report["analysis"]["profiles"]["memory"]["bulk_memory_ops"] >= 3
+
+
+def test_parse_wasm_file_captures_memory_trap64_growth_and_loads():
+    report = parse_wasm_file(_fixture_path("memory_trap64.wasm"))
+
+    assert report["errors"] == []
+    assert report["memories"][0]["limits"]["is_64"] is True
+    assert any(
+        ins["opcode"] == "memory.grow" and ins["immediates"] == [0]
+        for fn in report["functions"]
+        for ins in fn["instructions"]
+    )
+    assert any(
+        ins["opcode"] == "i32.load" and ins["immediates"] == [2, 0]
+        for fn in report["functions"]
+        for ins in fn["instructions"]
+    )
+
+
+def test_parse_wasm_file_captures_table_fill64_ops():
+    report = parse_wasm_file(_fixture_path("table_fill64.wasm"))
+
+    assert report["errors"] == []
+    assert report["tables"][1]["limits"]["is_64"] is True
+    assert any(
+        ins["opcode"] == "table.fill" and ins["immediates"] == [1]
+        for fn in report["functions"]
+        for ins in fn["instructions"]
+    )
+    assert any(
+        ins["opcode"] == "table.get" and ins["immediates"] == [1]
+        for fn in report["functions"]
+        for ins in fn["instructions"]
+    )
+
+
+def test_parse_wasm_file_captures_table_set64_ops():
+    report = parse_wasm_file(_fixture_path("table_set64.wasm"))
+
+    assert report["errors"] == []
+    assert report["tables"][0]["limits"]["is_64"] is True
+    assert report["tables"][1]["limits"]["is_64"] is True
+    assert any(
+        ins["opcode"] == "table.set" and ins["immediates"] == [0]
+        for fn in report["functions"]
+        for ins in fn["instructions"]
+    )
+    assert any(
+        ins["opcode"] == "table.set" and ins["immediates"] == [1]
+        for fn in report["functions"]
+        for ins in fn["instructions"]
+    )
+
+
+def test_parse_wasm_file_captures_table_size64_limits_and_growth():
+    report = parse_wasm_file(_fixture_path("table_size64.wasm"))
+
+    assert report["errors"] == []
+    assert all(table["limits"]["is_64"] is True for table in report["tables"])
+    assert any(
+        ins["opcode"] == "table.size" and ins["immediates"] == [3]
+        for fn in report["functions"]
+        for ins in fn["instructions"]
+    )
+    assert any(
+        ins["opcode"] == "table.grow" and ins["immediates"] == [3]
+        for fn in report["functions"]
+        for ins in fn["instructions"]
+    )
+    assert report["analysis"]["profiles"]["control_flow"]["table_mutation_ops"] >= 4
+
+
+def test_parse_wasm_file_captures_simd_store64_lane_immediates():
+    report = parse_wasm_file(_fixture_path("simd_store64_lane.wasm"))
+
+    assert report["errors"] == []
+    assert any(
+        ins["opcode"] == "v128.store64_lane" and ins["immediates"] == [2, 1, 1]
+        for fn in report["functions"]
+        for ins in fn["instructions"]
+    )

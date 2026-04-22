@@ -160,7 +160,7 @@ Status terms used below:
 | Import section                                     | `5.4-binary.modules.spectec` | Tested  | All five import kinds (func, table, memory, global, tag) fully decoded into `ImportEntry` with kind-specific fields. Exposed in `--details` output, JSON `imports[]`, and covered by `tests/test_details.py`. |
 | Function section                                   | `5.4-binary.modules.spectec` | Tested  | Function signature indices decoded and stored via `on_function`. Used in prepass and JSON reports.                                                                                                            |
 | Table section                                      | `5.4-binary.modules.spectec` | Tested  | Reference type and limits decoded into `TableEntry`. Exposed in `--details` and JSON `tables[]`.                                                                                                              |
-| Memory section                                     | `5.4-binary.modules.spectec` | Tested  | Limits decoded (i32 and i64 variants) into `MemoryEntry`. Exposed in `--details` and JSON `memories[]`.                                                                                                       |
+| Memory section                                     | `5.4-binary.modules.spectec` | Tested  | Limits decoded (i32 and i64 variants, including shared flag combinations) into `MemoryEntry`. Exposed in `--details` and JSON `memories[]`.                                                                  |
 | Global section                                     | `5.4-binary.modules.spectec` | Tested  | Value type, mutability, and constant init expression decoded into `GlobalEntry`. Exposed in `--details` and JSON `globals[]`.                                                                                 |
 | Export section                                     | `5.4-binary.modules.spectec` | Tested  | All five export kinds decoded into `ExportEntry`. Exposed in `--details` and JSON `exports[]`.                                                                                                                |
 | Start section                                      | `5.4-binary.modules.spectec` | Tested  | Start function index stored and surfaced in JSON `start_function` field and `--details` output.                                                                                                               |
@@ -178,9 +178,9 @@ Status terms used below:
 | Block/control structure (`block`, `loop`, `if`, `else`, `end`)                                     | `5.3-binary.instructions.spectec` | Tested | Block signatures and expression depth tracking are implemented in `read_instructions()`. Covered by `control_flow.wat` and `complex_flow.wat`.                                                                                                                   |
 | Branching (`br`, `br_if`, `br_table`, `return`)                                                    | `5.3-binary.instructions.spectec` | Tested | Core branch immediates are decoded. `br_table` target list decoded and printed. Covered by `tests/test_e2e.py` and `adversarial_ops.wat`.                                                                                                                        |
 | Direct and indirect calls (`call`, `call_indirect`)                                                | `5.3-binary.instructions.spectec` | Tested | Direct index operands and `call_indirect` signature/table operands decoded. Covered by `call_indirect.wat` and `complex_flow.wat`.                                                                                                                               |
-| Return-call extensions (`return_call`, `return_call_indirect`, `call_ref`, `return_call_ref`)      | `5.3-binary.instructions.spectec` | Tested | All four opcodes are in `OPCODES` with correct immediate types. Covered by `tests/test_extended_ops.py`.                                                                                                                                                         |
+| Return-call extensions (`return_call`, `return_call_indirect`, `call_ref`, `return_call_ref`)      | `5.3-binary.instructions.spectec` | Tested | All four opcodes are in `OPCODES` with correct immediate types. Covered by `tests/test_extended_ops.py` and fixture-level `call_ref` disassembly in `call_refs.wat`.                                            |
 | Variable access (`local.get/set/tee`, `global.get/set`)                                            | `5.3-binary.instructions.spectec` | Tested | Index immediates decoded and printed. Covered by arithmetic, globals, and control-flow fixtures.                                                                                                                                                                 |
-| Memory load/store with memarg                                                                      | `5.3-binary.instructions.spectec` | Tested | All scalar load/store instructions use the `MEMARG` decoder path. Covered by `memory_data.wat` and `complex_flow.wat`.                                                                                                                                           |
+| Memory load/store with memarg                                                                      | `5.3-binary.instructions.spectec` | Tested | All scalar load/store instructions use the `MEMARG` decoder path, including memory64 large-offset fixtures. Covered by `memory_data.wat`, `complex_flow.wat`, and `load64.wat`.                                                                                |
 | Integer and float constants                                                                        | `5.3-binary.instructions.spectec` | Tested | `i32.const`, `i64.const`, `f32.const`, and `f64.const` immediates decoded. Edge signed immediates covered in parser tests and `adversarial_ops.wat`.                                                                                                             |
 | Scalar numeric arithmetic and comparisons                                                          | `5.3-binary.instructions.spectec` | Tested | Full i32, i64, f32, f64 arithmetic, comparison, and conversion opcode sets are in `OPCODES`. Sign-extension opcodes (`0xC0-0xC4`) included. Covered by `tests/test_extended_ops.py`.                                                                             |
 | Reference type instructions (`ref.null`, `ref.func`, `ref.eq`, etc.)                               | `5.3-binary.instructions.spectec` | Tested | `0xD0-0xD6` fully mapped. `ref.null` uses `HEAP_TYPE` immediate. `br_on_null`/`br_on_non_null` use `INDEX`. Covered by `tests/test_extended_ops.py`.                                                                                                             |
@@ -223,6 +223,8 @@ The structured report currently contains:
 - `sections`: list of section dictionaries with `index`, `id`, `name`, `size`, and `offset`,
 - `function_count`: number of decoded function bodies,
 - `functions`: list of function dictionaries with `index`, `name`, `signature_index`, `offset`, `body_size`, `instruction_count`, and `instructions`,
+- `tables`: list of decoded table entries with `index`, `ref_type`, and `limits` (`min`, `max`, `is_64`),
+- `memories`: list of decoded memory entries with `index` and `limits` (`min`, `max`, `is_64`),
 - `errors`: list of parsing or file read errors.
 
 Each instruction entry contains:
@@ -284,9 +286,22 @@ Representative fixtures include:
 
 - `simple_add.wat` for minimal arithmetic and local access,
 - `control_flow.wat` for `block`, `loop`, `br`, and `br_if`,
+- `labels_control.wat` for named-label lowering, `br_table` depth vectors, and label shadowing/redefinition patterns,
 - `memory_data.wat` for memory load semantics and data segments,
 - `globals_imports.wat` for imported globals and functions,
 - `call_indirect.wat` for indirect calls,
+- `call_refs.wat` for typed `call_ref` through locals and globals, plus null-ref call paths,
+- `load64.wat` for memory64 (`(memory i64 ...)`) addressing and large memarg offsets,
+- `float_memory64.wat` for memory64 float load/store decoding across `f32.*` and `f64.*` memory ops,
+- `bulk64.wat` for memory64 `memory.init`, `data.drop`, `memory.copy`, and `memory.fill`,
+- `memory_trap64.wat` for memory64 boundary-style address construction with `memory.size`, `memory.grow`, and scalar load/store ops,
+- `memory64_shared.wat` for shared memory64 limit decoding and `memory.size`/`memory.grow` disassembly,
+- `table_fill64.wat` for table64 `table.fill` and `table.get`,
+- `table_set64.wat` for table64 `table.set`/`table.get` on externref and funcref tables,
+- `table_size64.wat` for table64 `table.size`/`table.grow` plus i64 table limits,
+- `table_init64.wat` for table64 (`(table ... i64 ...)`) offsets plus `table.init`, `table.copy`, and table-indexed `call_indirect`,
+- `simd_store64_lane.wat` for SIMD lane memory operands, including `v128.store64_lane` alignment, offset, and lane immediates,
+- `unreachable.wat` for stack-polymorphic `unreachable` behavior across blocks, loops, calls, branches, memory, and numeric operators,
 - `bulk_memory.wat` for `memory.init`, `data.drop`, and `memory.fill`,
 - `complex_flow.wat` for mixed control flow, memory, direct calls, and indirect calls,
 - `unicode_names.wat` for Unicode content,

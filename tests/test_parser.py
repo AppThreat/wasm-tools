@@ -148,3 +148,17 @@ def test_read_module_without_on_error_does_not_raise():
     data = b"\x01asm\x01\x00\x00\x00"
     reader = BinaryReader(data, NoErrorDelegate())
     reader.read_module()
+
+
+def test_read_limits_shared_with_max_flag03():
+    # flag=0x03 => has max + shared, i32 index type
+    reader = BinaryReader(b"\x03\x01\x02", DummyDelegate())
+    mn, mx, is64 = reader.read_limits()
+    assert (mn, mx, is64) == (1, 2, False)
+
+
+def test_read_limits_shared_memory64_with_max_flag07():
+    # flag=0x07 => has max + shared + i64 index type
+    reader = BinaryReader(b"\x07\x01\x03", DummyDelegate())
+    mn, mx, is64 = reader.read_limits()
+    assert (mn, mx, is64) == (1, 3, True)
