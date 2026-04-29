@@ -29,6 +29,7 @@ This document is written for junior security analysts and developers who need to
    - [capabilities](#65-capabilities)
    - [profiles](#66-profiles)
    - [findings](#67-findings)
+   - [JS-to-Wasm boundary triage signals](#68-js-to-wasm-boundary-triage-signals)
 7. [Triage recipes](#7-triage-recipes)
    - [Is this module WASI?](#71-is-this-module-wasi)
    - [Does this module call into JavaScript?](#72-does-this-module-call-into-javascript)
@@ -642,6 +643,32 @@ Findings are rule-based detections with stable IDs.
 | `remediation` | Suggested action for the module author.                            |
 
 See §10 for the complete finding ID reference.
+
+---
+
+### 6.8 JS-to-Wasm boundary triage signals
+
+Use these three fields together when reviewing JS-facing modules (`detections.js_interface.detected == true`).
+
+| Signal                    | Where to read it                                         | How to interpret it                                                                                                                                                                                                                                                                                                     |
+| ------------------------- | -------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `signature_surface`       | `analysis.detections.js_interface.signature_surface`     | Boundary signature inventory. Focus on `risks` and `risky_boundary_count`. `externref_i64_mix` means boundary signatures include both tagged refs and `i64`-style values, which raises return-materialization complexity. `multi_result_boundary` and `ref_numeric_mix` indicate ABI shapes that deserve manual review. |
+| `callsite_conversion_ops` | `analysis.profiles.control_flow.callsite_conversion_ops` | Count of conversion/cast ops seen in the short window before calls. Treat as a pressure metric, not proof of a bug. `0` is simple, `1-3` is moderate glue complexity, `4+` usually means conversion-heavy wrappers that need closer inspection.                                                                         |
+| `WASM-JSCFG-006`          | `analysis.findings[]`                                    | Raised when JS exposure, dynamic dispatch, and table mutation overlap. This is a high-risk complexity pattern because exported/entry code paths combine `call_indirect`/`call_ref` with mutable tables. Prioritize for manual disassembly review.                                                                       |
+
+**Mini triage flow (60-90 seconds):**
+
+1. Check `signature_surface.risks`; if it includes `externref_i64_mix`, mark as boundary-sensitive.
+2. Check `callsite_conversion_ops`; if non-zero, inspect exported/start functions first.
+3. If `WASM-JSCFG-006` is present, escalate to deep review and inspect table writes plus indirect/ref call paths together.
+
+**One-command pull for all three signals:**
+
+```bash
+wasm-tools module.wasm --json | jq '{signature_surface: .analysis.detections.js_interface.signature_surface, callsite_conversion_ops: .analysis.profiles.control_flow.callsite_conversion_ops, wasm_jscfg_006: first([.analysis.findings[]? | select(.id == "WASM-JSCFG-006")])}'
+```
+
+> These are static heuristics. They identify modules that are more likely to contain fragile JS/Wasm boundary glue; they do not, by themselves, confirm exploitability.
 
 ---
 
