@@ -16,6 +16,7 @@ _HIGH_RISK_FINDING_WEIGHTS = {
     "WASM-DOS-003": 30,
     "WASM-LOOP-004": 15,
     "WASM-FMT-005": 10,
+    "WASM-JSCFG-006": 20,
 }
 
 
@@ -293,11 +294,13 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
 
         analysis = self._build_analysis(
             functions=functions,
+            types=types,
             imports=imports,
             exports=exports,
             data_segments=data_segments,
             sections=self.sections,
             module_version=self.module_version,
+            start_function=state.start_function,
             errors=self.errors,
         )
 
@@ -325,11 +328,13 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
     def _build_analysis(
         self,
         functions: list[dict[str, Any]],
+        types: list[dict[str, Any]],
         imports: list[dict[str, Any]],
         exports: list[dict[str, Any]],
         data_segments: list[dict[str, Any]],
         sections: list[dict[str, Any]],
         module_version: int | None,
+        start_function: int | None,
         errors: list[str],
     ) -> dict[str, Any]:
         op_counts: dict[str, int] = {}
@@ -338,12 +343,15 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
         loop_branch_ops = 0
         indirect_call_ops = 0
         table_mutation_ops = 0
+        callsite_conversion_ops = 0
+        call_ref_unguarded_ops = 0
         memory_grow_ops = 0
         bulk_memory_ops = 0
         memory_access_ops = 0
         dynamic_funcs: set[int] = set()
         table_mutation_funcs: set[int] = set()
         loop_memory_funcs: set[int] = set()
+        js_calling_funcs: set[int] = set()
 
         block_openers = {"block", "loop", "if", "try_table"}
         table_mutators = {
@@ -355,11 +363,26 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
             "elem.drop",
         }
         bulk_memory = {"memory.init", "memory.copy", "memory.fill", "data.drop"}
+        call_ops = {
+            "call",
+            "return_call",
+            "call_indirect",
+            "return_call_indirect",
+            "call_ref",
+            "return_call_ref",
+        }
+        call_ref_ops = {"call_ref", "return_call_ref"}
+        js_import_indices = {
+            int(imp.get("index", -1))
+            for imp in imports
+            if str(imp.get("kind", "")) == "func" and self._is_js_related_import(imp)
+        }
 
         for fn in functions:
             active_loops = 0
             block_stack: list[str] = []
-            for ins in fn.get("instructions", []):
+            instructions = fn.get("instructions", [])
+            for ins_idx, ins in enumerate(instructions):
                 op = ins.get("opcode", "")
                 op_counts[op] = op_counts.get(op, 0) + 1
 
@@ -409,17 +432,59 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
                     indirect_call_ops += 1
                     dynamic_funcs.add(fn.get("index", -1))
 
+                if op in call_ops:
+                    nearby = instructions[max(0, ins_idx - 3) : ins_idx]
+                    callsite_conversion_ops += sum(
+                        1
+                        for nearby_ins in nearby
+                        if self._is_conversion_opcode(str(nearby_ins.get("opcode", "")))
+                    )
+
+                if op in call_ref_ops:
+                    nearby = instructions[max(0, ins_idx - 3) : ins_idx]
+                    if not any(
+                        self._is_call_ref_guard_opcode(
+                            str(nearby_ins.get("opcode", ""))
+                        )
+                        for nearby_ins in nearby
+                    ):
+                        call_ref_unguarded_ops += 1
+
+                if op in {"call", "return_call"} and ins.get("immediates"):
+                    target = ins["immediates"][0]
+                    if isinstance(target, int) and target in js_import_indices:
+                        js_calling_funcs.add(fn.get("index", -1))
+
                 if op in table_mutators:
                     table_mutation_ops += 1
                     table_mutation_funcs.add(fn.get("index", -1))
 
         capabilities = sorted(self._capabilities_from_imports(imports))
         wasi_detection = self._wasi_signals_from_imports(imports)
-        js_interface_detection = self._js_interface_signals(imports, exports)
+        js_interface_detection = self._js_interface_signals(
+            imports=imports,
+            exports=exports,
+            types=types,
+            functions=functions,
+            start_function=start_function,
+        )
         format_detection = self._format_signals(
             module_version=module_version,
             sections=sections,
             errors=errors,
+        )
+        exported_func_indices = {
+            int(exp.get("ref_index", -1))
+            for exp in exports
+            if str(exp.get("kind", "")) == "func"
+        }
+        js_exposed_function_indices = set(js_calling_funcs)
+        js_exposed_function_indices.update(i for i in exported_func_indices if i >= 0)
+        if isinstance(start_function, int) and start_function >= 0:
+            js_exposed_function_indices.add(start_function)
+        js_dynamic_funcs = dynamic_funcs.intersection(js_exposed_function_indices)
+        js_table_mutation_funcs = table_mutation_funcs.intersection(
+            js_exposed_function_indices
         )
         findings = self._build_findings(
             capabilities=capabilities,
@@ -435,6 +500,9 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
             table_mutation_funcs=table_mutation_funcs,
             loop_memory_funcs=loop_memory_funcs,
             format_detection=format_detection,
+            js_interface_detection=js_interface_detection,
+            js_exposed_dynamic_funcs=js_dynamic_funcs,
+            js_exposed_table_mutation_funcs=js_table_mutation_funcs,
         )
 
         cap_risk = {
@@ -481,6 +549,8 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
                 "control_flow": {
                     "indirect_call_ops": indirect_call_ops,
                     "table_mutation_ops": table_mutation_ops,
+                    "callsite_conversion_ops": callsite_conversion_ops,
+                    "call_ref_unguarded_ops": call_ref_unguarded_ops,
                 },
                 "compute": {
                     "max_loop_depth": loop_max_depth,
@@ -526,6 +596,9 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
         self,
         imports: list[dict[str, Any]],
         exports: list[dict[str, Any]],
+        types: list[dict[str, Any]],
+        functions: list[dict[str, Any]],
+        start_function: int | None,
     ) -> dict[str, Any]:
         """Classify JavaScript-interface import/export signals from decoded descriptors."""
         signals: set[str] = set()
@@ -544,14 +617,12 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
             module = str(imp.get("module", ""))
             name = str(imp.get("name", ""))
             kind = str(imp.get("kind", ""))
-            is_js_related = False
+            is_js_related = self._is_js_related_import(imp)
 
             if module in {"js", "wbg"}:
                 signals.add("js_namespace_import")
-                is_js_related = True
             if module.startswith("wasm:"):
                 signals.add("wasm_builtin_namespace_import")
-                is_js_related = True
             if module == "env" and any(
                 token in name
                 for token in (
@@ -564,16 +635,58 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
                 )
             ):
                 signals.add("env_glue_import")
-                is_js_related = True
             if name.startswith("__wbindgen") or name.startswith("__wbg_"):
                 signals.add("wbindgen_pattern")
-                is_js_related = True
             if "emscripten" in name or name.startswith("invoke_"):
                 signals.add("emscripten_pattern")
-                is_js_related = True
 
             if is_js_related:
                 js_imports.append({"module": module, "name": name, "kind": kind})
+
+        type_map = {
+            int(t.get("index", -1)): t for t in types if isinstance(t.get("index"), int)
+        }
+        function_map = {
+            int(fn.get("index", -1)): fn
+            for fn in functions
+            if isinstance(fn.get("index"), int)
+        }
+        import_type_map = {
+            int(imp.get("index", -1)): imp.get("type_index")
+            for imp in imports
+            if str(imp.get("kind", "")) == "func" and isinstance(imp.get("index"), int)
+        }
+
+        signature_entries: list[dict[str, Any]] = []
+        risky_import_signatures: list[dict[str, Any]] = []
+
+        for imp in imports:
+            if str(imp.get("kind", "")) != "func" or not self._is_js_related_import(
+                imp
+            ):
+                continue
+            sig = self._type_for_index(type_map, imp.get("type_index"))
+            entry = {
+                "source": "import",
+                "module": str(imp.get("module", "")),
+                "name": str(imp.get("name", "")),
+                "type_index": imp.get("type_index"),
+                "params": sig["params"],
+                "results": sig["results"],
+            }
+            signature_entries.append(entry)
+            reasons = self._signature_risk_reasons(sig["params"], sig["results"])
+            if reasons:
+                risky_import_signatures.append(
+                    {
+                        "module": entry["module"],
+                        "name": entry["name"],
+                        "type_index": entry["type_index"],
+                        "params": entry["params"],
+                        "results": entry["results"],
+                        "reasons": reasons,
+                    }
+                )
 
         for exp in exports:
             name = str(exp.get("name", ""))
@@ -587,6 +700,51 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
                 is_js_related = True
             if is_js_related:
                 js_exports.append({"name": name, "kind": kind})
+
+            if kind == "func":
+                ref_index = exp.get("ref_index")
+                type_index = import_type_map.get(ref_index)
+                if type_index is None and isinstance(ref_index, int):
+                    type_index = function_map.get(ref_index, {}).get("signature_index")
+                sig = self._type_for_index(type_map, type_index)
+                signature_entries.append(
+                    {
+                        "source": "export",
+                        "name": name,
+                        "index": ref_index,
+                        "type_index": type_index,
+                        "params": sig["params"],
+                        "results": sig["results"],
+                    }
+                )
+
+        has_externref = any(
+            "externref" in (entry.get("params", []) + entry.get("results", []))
+            for entry in signature_entries
+        )
+        has_i64 = any(
+            "i64" in (entry.get("params", []) + entry.get("results", []))
+            for entry in signature_entries
+        )
+        boundary_risks: set[str] = set()
+        if has_externref and has_i64:
+            boundary_risks.add("externref_i64_mix")
+        if any(len(entry.get("results", [])) > 1 for entry in signature_entries):
+            boundary_risks.add("multi_result_boundary")
+        if any(
+            self._has_ref_and_numeric_mix(
+                entry.get("params", []),
+                entry.get("results", []),
+            )
+            for entry in signature_entries
+        ):
+            boundary_risks.add("ref_numeric_mix")
+
+        entry_trampolines = self._entry_trampoline_signals(
+            exports=exports,
+            start_function=start_function,
+            functions=function_map,
+        )
 
         # Confidence is tied to explicit namespace signals before name heuristics.
         if {"js_namespace_import", "wasm_builtin_namespace_import"}.intersection(
@@ -608,6 +766,171 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
             "builtin_sets": builtin_sets,
             "imports": js_imports,
             "exports": js_exports,
+            "signature_surface": {
+                "boundary_count": len(signature_entries),
+                "risky_boundary_count": len(risky_import_signatures),
+                "risks": sorted(boundary_risks),
+                "entries": signature_entries,
+            },
+            "risky_import_signatures": risky_import_signatures,
+            "entry_trampolines": entry_trampolines,
+        }
+
+    def _entry_trampoline_signals(
+        self,
+        exports: list[dict[str, Any]],
+        start_function: int | None,
+        functions: dict[int, dict[str, Any]],
+    ) -> dict[str, Any]:
+        candidate_names = {"run", "start", "main", "_start", "__wbindgen_start"}
+        risky_ops = {
+            "call_indirect",
+            "return_call_indirect",
+            "call_ref",
+            "return_call_ref",
+            "table.set",
+            "table.grow",
+            "table.fill",
+            "table.copy",
+            "table.init",
+            "elem.drop",
+        }
+        trampolines: list[dict[str, Any]] = []
+        seen: set[int] = set()
+
+        candidate_indices = {
+            int(exp.get("ref_index", -1))
+            for exp in exports
+            if str(exp.get("kind", "")) == "func"
+            and str(exp.get("name", "")) in candidate_names
+            and isinstance(exp.get("ref_index"), int)
+        }
+        if isinstance(start_function, int):
+            candidate_indices.add(start_function)
+
+        for index in sorted(i for i in candidate_indices if i >= 0):
+            if index in seen or index not in functions:
+                continue
+            seen.add(index)
+            fn = functions[index]
+            instructions = fn.get("instructions", [])
+            if len(instructions) > 10:
+                continue
+            fn_risky_ops = [
+                str(ins.get("opcode", ""))
+                for ins in instructions[:8]
+                if str(ins.get("opcode", "")) in risky_ops
+                or self._is_conversion_opcode(str(ins.get("opcode", "")))
+            ]
+            if fn_risky_ops:
+                trampolines.append(
+                    {
+                        "index": index,
+                        "name": str(fn.get("name", "")),
+                        "instruction_count": len(instructions),
+                        "risk_ops": fn_risky_ops,
+                    }
+                )
+
+        return {
+            "detected": bool(trampolines),
+            "count": len(trampolines),
+            "functions": trampolines,
+        }
+
+    def _is_js_related_import(self, imp: dict[str, Any]) -> bool:
+        module = str(imp.get("module", ""))
+        name = str(imp.get("name", ""))
+        if module in {"js", "wbg"}:
+            return True
+        if module.startswith("wasm:"):
+            return True
+        if module == "env" and any(
+            token in name
+            for token in (
+                "log",
+                "print",
+                "console",
+                "emscripten",
+                "invoke_",
+                "abort",
+            )
+        ):
+            return True
+        if name.startswith("__wbindgen") or name.startswith("__wbg_"):
+            return True
+        return "emscripten" in name or name.startswith("invoke_")
+
+    def _type_for_index(
+        self, type_map: dict[int, dict[str, Any]], type_index: Any
+    ) -> dict[str, list[str]]:
+        if not isinstance(type_index, int) or type_index not in type_map:
+            return {"params": [], "results": []}
+        type_rec = type_map[type_index]
+        return {
+            "params": [str(v) for v in type_rec.get("params", [])],
+            "results": [str(v) for v in type_rec.get("results", [])],
+        }
+
+    def _has_ref_and_numeric_mix(self, params: list[str], results: list[str]) -> bool:
+        values = params + results
+        has_ref = any(
+            v in {"externref", "funcref", "anyref", "eqref", "i31ref"} for v in values
+        )
+        has_numeric = any(v in {"i32", "i64", "f32", "f64", "v128"} for v in values)
+        return has_ref and has_numeric
+
+    def _signature_risk_reasons(
+        self, params: list[str], results: list[str]
+    ) -> list[str]:
+        reasons: list[str] = []
+        values = params + results
+        if "externref" in values and "i64" in values:
+            reasons.append("externref_i64_mix")
+        if len(results) > 1:
+            reasons.append("multi_result_boundary")
+        if self._has_ref_and_numeric_mix(params, results):
+            reasons.append("ref_numeric_mix")
+        return reasons
+
+    def _is_conversion_opcode(self, opcode: str) -> bool:
+        if opcode in {
+            "i32.wrap_i64",
+            "i64.extend_i32_s",
+            "i64.extend_i32_u",
+            "f32.demote_f64",
+            "f64.promote_f32",
+            "any.convert_extern",
+            "extern.convert_any",
+            "ref.cast",
+            "ref.test",
+            "br_on_cast",
+            "br_on_cast_fail",
+        }:
+            return True
+        return opcode.startswith(
+            (
+                "i32.trunc_",
+                "i64.trunc_",
+                "i32.extend",
+                "f32.convert_",
+                "f64.convert_",
+                "i32.reinterpret_",
+                "i64.reinterpret_",
+                "f32.reinterpret_",
+                "f64.reinterpret_",
+            )
+        )
+
+    def _is_call_ref_guard_opcode(self, opcode: str) -> bool:
+        return opcode in {
+            "ref.is_null",
+            "ref.test",
+            "ref.cast",
+            "br_on_null",
+            "br_on_non_null",
+            "br_on_cast",
+            "br_on_cast_fail",
         }
 
     def _format_signals(
@@ -726,6 +1049,11 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
         loop_memory_funcs: set[int] = kwargs["loop_memory_funcs"]
         format_detection: dict[str, Any] = kwargs["format_detection"]
         loop_max_depth: int = kwargs["loop_max_depth"]
+        js_interface_detection: dict[str, Any] = kwargs["js_interface_detection"]
+        js_exposed_dynamic_funcs: set[int] = kwargs["js_exposed_dynamic_funcs"]
+        js_exposed_table_mutation_funcs: set[int] = kwargs[
+            "js_exposed_table_mutation_funcs"
+        ]
 
         findings: list[dict[str, Any]] = []
 
@@ -804,6 +1132,33 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
                 }
             )
 
+        if (
+            js_interface_detection.get("detected")
+            and indirect_call_ops > 0
+            and table_mutation_ops > 0
+            and js_exposed_dynamic_funcs
+            and js_exposed_table_mutation_funcs
+        ):
+            findings.append(
+                {
+                    "id": "WASM-JSCFG-006",
+                    "title": "JS-exposed entrypoints combine dynamic dispatch and mutable table operations",
+                    "severity": "high",
+                    "confidence": "medium",
+                    "evidence": {
+                        "indirect_call_ops": indirect_call_ops,
+                        "table_mutation_ops": table_mutation_ops,
+                        "js_exposed_dynamic_funcs": sorted(
+                            i for i in js_exposed_dynamic_funcs if i >= 0
+                        ),
+                        "js_exposed_table_mutation_funcs": sorted(
+                            i for i in js_exposed_table_mutation_funcs if i >= 0
+                        ),
+                    },
+                    "remediation": "Reduce mutable table writes in exported/JS-facing entrypoints and isolate dynamic dispatch behind strict validation.",
+                }
+            )
+
         return findings
 
 
@@ -854,6 +1209,18 @@ def parse_wasm_file(path: str) -> dict[str, Any]:
                         "builtin_sets": [],
                         "imports": [],
                         "exports": [],
+                        "signature_surface": {
+                            "boundary_count": 0,
+                            "risky_boundary_count": 0,
+                            "risks": [],
+                            "entries": [],
+                        },
+                        "risky_import_signatures": [],
+                        "entry_trampolines": {
+                            "detected": False,
+                            "count": 0,
+                            "functions": [],
+                        },
                     },
                     "format": {
                         "kind": "invalid-core",

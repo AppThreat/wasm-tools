@@ -1,6 +1,6 @@
 [project]
 name = "wasm-tools"
-version = "1.0.3"
+version = "1.0.4"
 description = "A pure-Python WebAssembly binary parser, disassembler, and structured analysis library"
 authors = [
     {name = "Team AppThreat",email = "cloud@appthreat.com"}

@@ -162,6 +162,69 @@ def test_parse_wasm_file_keeps_js_interface_schema_when_not_detected():
     assert jsi["signals"] == []
     assert jsi["imports"] == []
     assert jsi["exports"] == []
+    assert jsi["signature_surface"] == {
+        "boundary_count": 1,
+        "risky_boundary_count": 0,
+        "risks": [],
+        "entries": [
+            {
+                "source": "export",
+                "name": "add",
+                "index": 0,
+                "type_index": 0,
+                "params": ["i32", "i32"],
+                "results": ["i32"],
+            }
+        ],
+    }
+    assert jsi["risky_import_signatures"] == []
+    assert jsi["entry_trampolines"] == {
+        "detected": False,
+        "count": 0,
+        "functions": [],
+    }
+
+
+def test_parse_wasm_file_reports_js_boundary_surface_and_deopt_proxies():
+    report = parse_wasm_file(_fixture_path("js_deopt_surface.wasm"))
+
+    assert report["errors"] == []
+    jsi = report["analysis"]["detections"]["js_interface"]
+    assert jsi["detected"] is True
+    assert jsi["confidence"] == "high"
+    assert set(jsi["signature_surface"]["risks"]) >= {
+        "externref_i64_mix",
+        "multi_result_boundary",
+        "ref_numeric_mix",
+    }
+    assert jsi["signature_surface"]["boundary_count"] >= 7
+    assert jsi["signature_surface"]["risky_boundary_count"] >= 1
+    assert any(
+        sig["name"] == "to_i64" and "externref_i64_mix" in sig["reasons"]
+        for sig in jsi["risky_import_signatures"]
+    )
+
+    assert jsi["entry_trampolines"]["detected"] is True
+    assert any(
+        item["risk_ops"]
+        for item in jsi["entry_trampolines"]["functions"]
+        if item["index"] >= 0
+    )
+
+    cf = report["analysis"]["profiles"]["control_flow"]
+    assert cf["callsite_conversion_ops"] >= 1
+    assert cf["call_ref_unguarded_ops"] >= 1
+
+    finding_ids = {f["id"] for f in report["analysis"]["findings"]}
+    assert "WASM-CFG-002" in finding_ids
+    assert "WASM-JSCFG-006" in finding_ids
+
+
+def test_parse_wasm_file_profiles_call_ref_guard_quality():
+    report = parse_wasm_file(_fixture_path("call_refs.wasm"))
+
+    cf = report["analysis"]["profiles"]["control_flow"]
+    assert cf["call_ref_unguarded_ops"] >= 1
 
 
 def test_parse_wasm_file_marks_core_format_for_regular_module():

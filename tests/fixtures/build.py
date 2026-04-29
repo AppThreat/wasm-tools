@@ -10,6 +10,7 @@ _EXTRA_FLAGS: dict = {
     "threads_basic.wat": ["--enable-threads"],
     "gc_basic.wat": ["--enable-gc"],
     "call_refs.wat": ["--enable-function-references", "--enable-gc"],
+    "js_deopt_surface.wat": ["--enable-function-references", "--enable-gc"],
     "load64.wat": ["--enable-memory64"],
     "memory64_shared.wat": ["--enable-memory64", "--enable-threads"],
     "table_init64.wat": ["--enable-memory64"],
