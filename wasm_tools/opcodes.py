@@ -5,7 +5,9 @@ Covers:
   - Core MVP opcodes (0x00-0xC4)
   - Bulk-memory / saturating-truncation (0xFC 0-11)
   - Table bulk ops (0xFC 12-17)
-  - SIMD / vector (0xFD prefix)
+  - Wide arithmetic (0xFC 19-22)
+  - Half-precision scalar memory ops (0xFC 48-49)
+  - SIMD / vector (0xFD prefix), incl. relaxed SIMD and f16x8 half-precision
   - GC / reference types (0xFB prefix)
   - Threads / atomics (0xFE prefix)
   - Exceptions / control-flow extensions (0x08, 0x0A, 0x1F, 0xD5, 0xD6)
@@ -282,6 +284,14 @@ _FC: dict = {
     (0xFC, 15): ("table.grow", ImmType.INDEX),
     (0xFC, 16): ("table.size", ImmType.INDEX),
     (0xFC, 17): ("table.fill", ImmType.INDEX),
+    # Wide arithmetic (128-bit math on i64 pairs; no immediates)
+    (0xFC, 19): ("i64.add128", ImmType.NONE),
+    (0xFC, 20): ("i64.sub128", ImmType.NONE),
+    (0xFC, 21): ("i64.mul_wide_s", ImmType.NONE),
+    (0xFC, 22): ("i64.mul_wide_u", ImmType.NONE),
+    # Half-precision scalar memory access (f16 stored/loaded as f32 on the stack)
+    (0xFC, 48): ("f32.load_f16", ImmType.MEMARG),
+    (0xFC, 49): ("f32.store_f16", ImmType.MEMARG),
 }
 
 # ─── 0xFB – GC / reference types ────────────────────────────────────────────
@@ -598,6 +608,23 @@ _FD: dict = dict(
         _simd_bare(273, "i16x8.relaxed_q15mulr_s"),
         _simd_bare(274, "i16x8.relaxed_dot_i8x16_i7x16_s"),
         _simd_bare(275, "i32x4.relaxed_dot_i8x16_i7x16_add_s"),
+        # Half-precision SIMD (f16x8 lanes)
+        _simd_bare(288, "f16x8.splat"),
+        _simd_lane(289, "f16x8.extract_lane"),
+        _simd_lane(290, "f16x8.replace_lane"),
+        _simd_bare(304, "f16x8.abs"),
+        _simd_bare(305, "f16x8.neg"),
+        _simd_bare(306, "f16x8.sqrt"),
+        _simd_bare(307, "f16x8.ceil"),
+        _simd_bare(308, "f16x8.floor"),
+        _simd_bare(309, "f16x8.trunc"),
+        _simd_bare(310, "f16x8.nearest"),
+        _simd_bare(311, "f16x8.eq"),
+        _simd_bare(312, "f16x8.ne"),
+        _simd_bare(313, "f16x8.lt"),
+        _simd_bare(314, "f16x8.gt"),
+        _simd_bare(315, "f16x8.le"),
+        _simd_bare(316, "f16x8.ge"),
     ]
 )
 

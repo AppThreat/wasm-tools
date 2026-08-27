@@ -69,6 +69,9 @@ class Limits:
     minimum: int = 0
     maximum: Optional[int] = None
     is_64: bool = False
+    shared: bool = False
+    # Custom page size exponent (custom-page-sizes proposal); None = default 64 KiB.
+    page_size_log2: Optional[int] = None
 
     def __str__(self) -> str:
         base = f"min={self.minimum}"
@@ -76,6 +79,10 @@ class Limits:
             base += f" max={self.maximum}"
         if self.is_64:
             base += " i64"
+        if self.shared:
+            base += " shared"
+        if self.page_size_log2 is not None:
+            base += f" pagesize=2^{self.page_size_log2}"
         return base
 
 
@@ -144,6 +151,8 @@ class DataEntry:
     offset_expr: str  # human-readable init expression for offset
     size: int
     data: bytes = field(default_factory=bytes, repr=False)
+    # Numeric value of the constant offset expression when decodable (i32/i64 const).
+    offset_value: Optional[int] = None
 
 
 @dataclass
@@ -216,6 +225,11 @@ class ObjdumpState:
         self.tags: List[TagEntry] = []
         self.start_function: Optional[int] = None
         self.data_count: Optional[int] = None
+        # Toolchain fingerprint custom sections.
+        # producers: field name ("language"/"processed-by"/"sdk") -> [(name, version), ...]
+        self.producers: Dict[str, List[Tuple[str, str]]] = {}
+        # target_features: (enabled, feature_name) pairs; '+' prefix = enabled.
+        self.target_features: List[Tuple[bool, str]] = []
         self.imported_function_count: int = 0
         self.imported_table_count: int = 0
         self.imported_memory_count: int = 0

@@ -1,5 +1,5 @@
 import struct
-from typing import Any, List, Tuple
+from typing import Any, List, Optional, Tuple
 
 from .models import BinarySection
 from .opcodes import OPCODES, ImmType
@@ -183,18 +183,27 @@ class BinaryReader:
         # GC reftype
         return self.read_reftype()
 
-    def read_limits(self) -> Tuple[int, Any, bool]:
-        """Return (minimum, maximum_or_None, is_64)."""
+    def read_limits(self) -> Tuple[int, Any, bool, bool, Optional[int]]:
+        """Return (minimum, maximum_or_None, is_64, shared, page_size_log2_or_None).
+
+        Limits flags are a bitfield:
+          bit0 => has max, bit1 => shared, bit2 => 64-bit index type,
+          bit3 => custom page size present (custom-page-sizes proposal),
+        in which case a u32 ``page_size_log2`` follows the limits.
+        """
         flag = self.read_u8()
-        # Limits flags use bitfields:
-        # bit0 => has max, bit1 => shared, bit2 => 64-bit index type.
         has_max = bool(flag & 0x01)
+        shared = bool(flag & 0x02)
         is_64 = bool(flag & 0x04)
+        has_page_size = bool(flag & 0x08)
         minimum = self.read_leb128(max_bits=64)
         maximum = None
         if has_max:
             maximum = self.read_leb128(max_bits=64)
-        return minimum, maximum, is_64
+        page_size_log2 = None
+        if has_page_size:
+            page_size_log2 = self.read_leb128(max_bits=32)
+        return minimum, maximum, is_64, shared, page_size_log2
 
     def read_globaltype(self) -> Tuple[str, bool]:
         """Return (valtype_name, mutable)."""
@@ -202,37 +211,41 @@ class BinaryReader:
         mut = self.read_u8()
         return vt, bool(mut)
 
-    def read_init_expr(self) -> str:
-        """Read a constant expression (ends at 0x0B) and return a readable string."""
+    def read_init_expr(self) -> Tuple[str, Optional[int]]:
+        """Read a constant expression (ends at 0x0B).
+
+        Returns (readable text, numeric value or None) so callers that need a
+        numeric offset (data segments) do not have to re-parse the text form.
+        """
         opcode = self.read_u8()
         if opcode == 0x41:
             val = self.read_leb128(signed=True, max_bits=32)
             self.read_u8()  # 0x0B end
-            return f"i32={val}"
+            return f"i32={val}", val
         if opcode == 0x42:
             val = self.read_leb128(signed=True, max_bits=64)
             self.read_u8()
-            return f"i64={val}"
+            return f"i64={val}", val
         if opcode == 0x43:
             val = self.read_f32()
             self.read_u8()
-            return f"f32={val:.6g}"
+            return f"f32={val:.6g}", None
         if opcode == 0x44:
             val = self.read_f64()
             self.read_u8()
-            return f"f64={val:.6g}"
+            return f"f64={val:.6g}", None
         if opcode == 0xD2:
             idx = self.read_leb128(max_bits=32)
             self.read_u8()
-            return f"ref.func={idx}"
+            return f"ref.func={idx}", None
         if opcode == 0xD0:
             ht = self.read_heaptype()
             self.read_u8()
-            return f"ref.null={ht}"
+            return f"ref.null={ht}", None
         if opcode == 0x23:
             idx = self.read_leb128(max_bits=32)
             self.read_u8()
-            return f"global.get={idx}"
+            return f"global.get={idx}", None
         if opcode == 0xFB:
             sub = self.read_leb128(max_bits=32)
             # ref.i31 / struct.new_default etc. - skip remainder to 0x0B
@@ -241,7 +254,7 @@ class BinaryReader:
                 b = self.read_u8()
                 if b == 0x0B:
                     break
-            return f"gc.{sub}"
+            return f"gc.{sub}", None
         # Unknown: scan to 0x0B
         parts = [f"0x{opcode:02x}"]
         while self.offset < self.size:
@@ -249,7 +262,7 @@ class BinaryReader:
             if b == 0x0B:
                 break
             parts.append(f"0x{b:02x}")
-        return " ".join(parts)
+        return " ".join(parts), None
 
     # ─── Public entry points ─────────────────────────────────────────────────
 
@@ -351,6 +364,37 @@ class BinaryReader:
                             if hasattr(self.delegate, "on_local_name"):
                                 self.delegate.on_local_name(func_idx, local_idx, lname)
                 self.offset = sub_end
+        elif name == "producers":
+            # Tool-conventions ProducersSection.md:
+            #   vec(field); field ::= field_name:str vec((name:str, version:str))
+            try:
+                field_count = self.read_leb128(max_bits=32)
+                for _ in range(field_count):
+                    field_name = self.read_string()
+                    entry_count = self.read_leb128(max_bits=32)
+                    entries = []
+                    for _ in range(entry_count):
+                        prod_name = self.read_string()
+                        prod_version = self.read_string()
+                        entries.append((prod_name, prod_version))
+                    if hasattr(self.delegate, "on_producers_field"):
+                        self.delegate.on_producers_field(field_name, entries)
+            except WasmParseError:
+                pass  # malformed producers section: abandon rest of payload
+        elif name == "target_features":
+            # Tool-conventions Linking.md:
+            #   vec(feature); feature ::= prefix:byte name:str
+            #   prefix 0x2B ('+') = feature used, 0x2D ('-') = feature not used.
+            try:
+                feature_count = self.read_leb128(max_bits=32)
+                for _ in range(feature_count):
+                    prefix = self.read_u8()
+                    feature_name = self.read_string()
+                    enabled = prefix == 0x2B
+                    if hasattr(self.delegate, "on_target_feature"):
+                        self.delegate.on_target_feature(enabled, feature_name)
+            except WasmParseError:
+                pass  # malformed target_features section: abandon rest of payload
 
     def _read_functype(self) -> Tuple[List[str], List[str]]:
         """Read one function type (0x60 prefix + param vec + result vec)."""
@@ -416,17 +460,21 @@ class BinaryReader:
                 func_idx += 1
             elif kind_byte == 1:
                 extra["ref_type"] = self.read_reftype()
-                mn, mx, is64 = self.read_limits()
+                mn, mx, is64, shared, ps_log2 = self.read_limits()
                 extra["limits_min"] = mn
                 extra["limits_max"] = mx
                 extra["limits_64"] = is64
+                extra["limits_shared"] = shared
+                extra["limits_page_size_log2"] = ps_log2
                 extra["entity_index"] = table_idx
                 table_idx += 1
             elif kind_byte == 2:
-                mn, mx, is64 = self.read_limits()
+                mn, mx, is64, shared, ps_log2 = self.read_limits()
                 extra["limits_min"] = mn
                 extra["limits_max"] = mx
                 extra["limits_64"] = is64
+                extra["limits_shared"] = shared
+                extra["limits_page_size_log2"] = ps_log2
                 extra["entity_index"] = mem_idx
                 mem_idx += 1
             elif kind_byte == 3:
@@ -464,24 +512,37 @@ class BinaryReader:
                 self.read_u8()  # 0x40
                 self.read_u8()  # 0x00
             ref_type = self.read_reftype()
-            mn, mx, is64 = self.read_limits()
+            mn, mx, is64, shared, ps_log2 = self.read_limits()
             if hasattr(self.delegate, "on_table"):
                 self.delegate.on_table(
-                    self.imported_table_count + i, ref_type, mn, mx, is64
+                    self.imported_table_count + i,
+                    ref_type,
+                    mn,
+                    mx,
+                    is64,
+                    shared=shared,
+                    page_size_log2=ps_log2,
                 )
 
     def _decode_memory(self, end_offset: int) -> None:
         count = self.read_leb128(max_bits=32)
         for i in range(count):
-            mn, mx, is64 = self.read_limits()
+            mn, mx, is64, shared, ps_log2 = self.read_limits()
             if hasattr(self.delegate, "on_memory"):
-                self.delegate.on_memory(self.imported_memory_count + i, mn, mx, is64)
+                self.delegate.on_memory(
+                    self.imported_memory_count + i,
+                    mn,
+                    mx,
+                    is64,
+                    shared=shared,
+                    page_size_log2=ps_log2,
+                )
 
     def _decode_global(self, end_offset: int) -> None:
         count = self.read_leb128(max_bits=32)
         for i in range(count):
             vt, mut = self.read_globaltype()
-            init_expr = self.read_init_expr()
+            init_expr, _ = self.read_init_expr()
             if hasattr(self.delegate, "on_global"):
                 self.delegate.on_global(
                     self.imported_global_count + i, vt, mut, init_expr
@@ -515,7 +576,7 @@ class BinaryReader:
             func_indices: List[int] = []
 
             if seg_type == 0:
-                offset_expr = self.read_init_expr()
+                offset_expr, _ = self.read_init_expr()
                 n = self.read_leb128(max_bits=32)
                 func_indices = [self.read_leb128(max_bits=32) for _ in range(n)]
             elif seg_type == 1:
@@ -525,7 +586,7 @@ class BinaryReader:
                 func_indices = [self.read_leb128(max_bits=32) for _ in range(n)]
             elif seg_type == 2:
                 table_idx = self.read_leb128(max_bits=32)
-                offset_expr = self.read_init_expr()
+                offset_expr, _ = self.read_init_expr()
                 _kind = self.read_u8()
                 n = self.read_leb128(max_bits=32)
                 func_indices = [self.read_leb128(max_bits=32) for _ in range(n)]
@@ -535,7 +596,7 @@ class BinaryReader:
                 n = self.read_leb128(max_bits=32)
                 func_indices = [self.read_leb128(max_bits=32) for _ in range(n)]
             elif seg_type == 4:
-                offset_expr = self.read_init_expr()
+                offset_expr, _ = self.read_init_expr()
                 n = self.read_leb128(max_bits=32)
                 ref_type = "funcref"
                 # each entry is an init expr
@@ -604,18 +665,27 @@ class BinaryReader:
             seg_type = self.read_leb128(max_bits=32)
             mem_idx = 0
             offset_expr = "i32=0"
+            offset_value: Optional[int] = None
             if seg_type == 0:
-                offset_expr = self.read_init_expr()
+                offset_expr, offset_value = self.read_init_expr()
             elif seg_type == 1:
                 pass  # passive
             elif seg_type == 2:
                 mem_idx = self.read_leb128(max_bits=32)
-                offset_expr = self.read_init_expr()
+                offset_expr, offset_value = self.read_init_expr()
             n = self.read_leb128(max_bits=32)
             data_bytes = self.read_bytes(n)
             mode = "passive" if seg_type == 1 else "active"
             if hasattr(self.delegate, "on_data"):
-                self.delegate.on_data(i, mode, mem_idx, offset_expr, n, data_bytes)
+                self.delegate.on_data(
+                    i,
+                    mode,
+                    mem_idx,
+                    offset_expr,
+                    n,
+                    data_bytes,
+                    offset_value=offset_value,
+                )
 
     def _decode_data_count(self, end_offset: int) -> None:
         n = self.read_leb128(max_bits=32)

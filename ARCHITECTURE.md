@@ -68,10 +68,10 @@ The GC proposal adds heap type bytes (`0x69`-`0x74`) that can follow a `0x63` or
 Memory and table sizes are described by a limits structure:
 
 ```
-[flags: u8] [minimum: leb128u32] [maximum: leb128u32 if flag bit 0 is set]
+[flags: u8] [minimum: leb128u64] [maximum: leb128u64 if flag bit 0 is set] [page_size_log2: leb128u32 if flag bit 3 is set]
 ```
 
-The flags byte encodes whether a maximum is present (bit 0) and whether the address space is 64-bit (bit 2, Memory64 proposal). The parser normalises this into `(minimum, maximum_or_None, is_64)`.
+The flags byte encodes whether a maximum is present (bit 0), whether the memory is shared (bit 1, threads), whether the address space is 64-bit (bit 2, Memory64), and whether a custom page size follows (bit 3, custom-page-sizes proposal). The parser normalises this into `(minimum, maximum_or_None, is_64, shared, page_size_log2)`.
 
 ### LEB128 encoding
 
@@ -167,13 +167,13 @@ begin_custom_section(index, size, name)
 on_type(index, params, results)
 on_import(index, module, name, kind, **kwargs)
 on_function(index, sig_index)
-on_table(index, ref_type, min, max, is_64)
-on_memory(index, min, max, is_64)
+on_table(index, ref_type, min, max, is_64, shared=False, page_size_log2=None)
+on_memory(index, min, max, is_64, shared=False, page_size_log2=None)
 on_global(index, valtype, mutable, init_expr)
 on_export(index, name, kind, ref_index)
 on_start(func_index)
 on_element(index, mode, ref_type, table_idx, offset_expr, count, func_indices)
-on_data(index, mode, mem_idx, offset_expr, size, data_bytes)
+on_data(index, mode, mem_idx, offset_expr, size, data_bytes, offset_value=None)
 on_data_count(count)
 on_tag(index, type_index)
 begin_function_body(index, size)

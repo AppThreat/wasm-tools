@@ -153,12 +153,33 @@ def test_read_module_without_on_error_does_not_raise():
 def test_read_limits_shared_with_max_flag03():
     # flag=0x03 => has max + shared, i32 index type
     reader = BinaryReader(b"\x03\x01\x02", DummyDelegate())
-    mn, mx, is64 = reader.read_limits()
-    assert (mn, mx, is64) == (1, 2, False)
+    mn, mx, is64, shared, ps_log2 = reader.read_limits()
+    assert (mn, mx, is64, shared, ps_log2) == (1, 2, False, True, None)
 
 
 def test_read_limits_shared_memory64_with_max_flag07():
     # flag=0x07 => has max + shared + i64 index type
     reader = BinaryReader(b"\x07\x01\x03", DummyDelegate())
-    mn, mx, is64 = reader.read_limits()
-    assert (mn, mx, is64) == (1, 3, True)
+    mn, mx, is64, shared, ps_log2 = reader.read_limits()
+    assert (mn, mx, is64, shared, ps_log2) == (1, 3, True, True, None)
+
+
+def test_read_limits_custom_page_size_flag08():
+    # flag=0x08 => no max, i32, custom page size exponent 0 (1-byte pages)
+    reader = BinaryReader(b"\x08\x01\x00", DummyDelegate())
+    mn, mx, is64, shared, ps_log2 = reader.read_limits()
+    assert (mn, mx, is64, shared, ps_log2) == (1, None, False, False, 0)
+
+
+def test_read_limits_max_plus_custom_page_size_flag09():
+    # flag=0x09 => has max + custom page size; page_size_log2 follows the max
+    reader = BinaryReader(b"\x09\x01\x02\x10", DummyDelegate())
+    mn, mx, is64, shared, ps_log2 = reader.read_limits()
+    assert (mn, mx, is64, shared, ps_log2) == (1, 2, False, False, 16)
+
+
+def test_read_limits_shared64_custom_page_size_flag0f():
+    # flag=0x0f => has max + shared + i64 + custom page size
+    reader = BinaryReader(b"\x0f\x01\x03\x10", DummyDelegate())
+    mn, mx, is64, shared, ps_log2 = reader.read_limits()
+    assert (mn, mx, is64, shared, ps_log2) == (1, 3, True, True, 16)

@@ -41,11 +41,20 @@ Current CLI flags in `wasm_tools/cli.py`:
 - `-h`, `--headers` — print section header table with ids, sizes, and offsets
 - `-x`, `--details` — print section contents: type signatures, imports, exports, globals, tables, memories, data segments, elements, tags, and code body summaries
 - `-d`, `--disassemble` — decode and print function body instructions
+- `--strings` — extract printable strings from data segments with linear-memory provenance
+- `--strings-min-len N` — minimum string length for `--strings`/`--json`, applied at extraction (default 5)
+- `--no-strings` / `--no-call-graph` — skip the strings / call-graph derived blocks in `--json` reports
+- `--calls FUNC` — print an outgoing call tree for a function given by name or index
 - `--json` — print a minified JSON report to stdout
 - `--json-out PATH` — write a minified JSON report to `PATH`
 - `--analysis-only` — with `--json` and/or `--json-out`, emit only the high-level `analysis` object
 
 With no flags, `--details` is the default.
+
+Component-model binaries (preamble version `0x0d`+ / layer 1) are detected
+automatically: `-x`/`--headers` print a component summary, `-d` disassembles
+each nested core module, and `--json` includes the `component` block with the
+full interface inventory.
 
 Index notes for CLI output:
 
@@ -160,7 +169,7 @@ Status terms used below:
 | Import section                                     | `5.4-binary.modules.spectec` | Tested  | All five import kinds (func, table, memory, global, tag) fully decoded into `ImportEntry` with kind-specific fields. Exposed in `--details` output, JSON `imports[]`, and covered by `tests/test_details.py`. |
 | Function section                                   | `5.4-binary.modules.spectec` | Tested  | Function signature indices decoded and stored via `on_function`. Used in prepass and JSON reports.                                                                                                            |
 | Table section                                      | `5.4-binary.modules.spectec` | Tested  | Reference type and limits decoded into `TableEntry`. Exposed in `--details` and JSON `tables[]`.                                                                                                              |
-| Memory section                                     | `5.4-binary.modules.spectec` | Tested  | Limits decoded (i32 and i64 variants, including shared flag combinations) into `MemoryEntry`. Exposed in `--details` and JSON `memories[]`.                                                                   |
+| Memory section                                     | `5.4-binary.modules.spectec` | Tested  | Limits decoded (i32/i64 variants, shared flag, and custom page size exponents) into `MemoryEntry`. Exposed in `--details` and JSON `memories[]`.                                                              |
 | Global section                                     | `5.4-binary.modules.spectec` | Tested  | Value type, mutability, and constant init expression decoded into `GlobalEntry`. Exposed in `--details` and JSON `globals[]`.                                                                                 |
 | Export section                                     | `5.4-binary.modules.spectec` | Tested  | All five export kinds decoded into `ExportEntry`. Exposed in `--details` and JSON `exports[]`.                                                                                                                |
 | Start section                                      | `5.4-binary.modules.spectec` | Tested  | Start function index stored and surfaced in JSON `start_function` field and `--details` output.                                                                                                               |
@@ -172,26 +181,28 @@ Status terms used below:
 
 ### Instruction coverage
 
-| Area                                                                                               | Spec reference                    | Status | Current behavior and evidence                                                                                                                                                                                                                                    |
-| -------------------------------------------------------------------------------------------------- | --------------------------------- | ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Basic parametric instructions (`unreachable`, `nop`, `drop`, `select`)                             | `5.3-binary.instructions.spectec` | Tested | All mapped explicitly in `OPCODES`. Typed `select` with result type vector is handled via `SELECT_T` immediate dispatch. Covered by fixture disassembly tests.                                                                                                   |
-| Block/control structure (`block`, `loop`, `if`, `else`, `end`)                                     | `5.3-binary.instructions.spectec` | Tested | Block signatures and expression depth tracking are implemented in `read_instructions()`. Covered by `control_flow.wat` and `complex_flow.wat`.                                                                                                                   |
-| Branching (`br`, `br_if`, `br_table`, `return`)                                                    | `5.3-binary.instructions.spectec` | Tested | Core branch immediates are decoded. `br_table` target list decoded and printed. Covered by `tests/test_e2e.py` and `adversarial_ops.wat`.                                                                                                                        |
-| Direct and indirect calls (`call`, `call_indirect`)                                                | `5.3-binary.instructions.spectec` | Tested | Direct index operands and `call_indirect` signature/table operands decoded. Covered by `call_indirect.wat` and `complex_flow.wat`.                                                                                                                               |
-| Return-call extensions (`return_call`, `return_call_indirect`, `call_ref`, `return_call_ref`)      | `5.3-binary.instructions.spectec` | Tested | All four opcodes are in `OPCODES` with correct immediate types. Covered by `tests/test_extended_ops.py` and fixture-level `call_ref` disassembly in `call_refs.wat`.                                                                                             |
-| Variable access (`local.get/set/tee`, `global.get/set`)                                            | `5.3-binary.instructions.spectec` | Tested | Index immediates decoded and printed. Covered by arithmetic, globals, and control-flow fixtures.                                                                                                                                                                 |
-| Memory load/store with memarg                                                                      | `5.3-binary.instructions.spectec` | Tested | All scalar load/store instructions use the `MEMARG` decoder path, including memory64 large-offset fixtures. Covered by `memory_data.wat`, `complex_flow.wat`, and `load64.wat`.                                                                                  |
-| Integer and float constants                                                                        | `5.3-binary.instructions.spectec` | Tested | `i32.const`, `i64.const`, `f32.const`, and `f64.const` immediates decoded. Edge signed immediates covered in parser tests and `adversarial_ops.wat`.                                                                                                             |
-| Scalar numeric arithmetic and comparisons                                                          | `5.3-binary.instructions.spectec` | Tested | Full i32, i64, f32, f64 arithmetic, comparison, and conversion opcode sets are in `OPCODES`. Sign-extension opcodes (`0xC0-0xC4`) included. Covered by `tests/test_extended_ops.py`.                                                                             |
-| Reference type instructions (`ref.null`, `ref.func`, `ref.eq`, etc.)                               | `5.3-binary.instructions.spectec` | Tested | `0xD0-0xD6` fully mapped. `ref.null` uses `HEAP_TYPE` immediate. `br_on_null`/`br_on_non_null` use `INDEX`. Covered by `tests/test_extended_ops.py`.                                                                                                             |
-| Saturating truncation (`i32.trunc_sat_*`, `i64.trunc_sat_*`)                                       | `5.3-binary.instructions.spectec` | Tested | All eight `0xFC 0-7` opcodes in `OPCODES` with `NONE` immediate. Dispatch covered by `tests/test_extended_ops.py::test_dispatch_sat_trunc`.                                                                                                                      |
-| Bulk memory (`memory.init`, `data.drop`, `memory.copy`, `memory.fill`)                             | `5.3-binary.instructions.spectec` | Tested | `0xFC 8-11` with correct binary operand order for `memory.init`. Covered by `tests/test_confidence_parser.py`, `tests/test_e2e.py`, `tests/test_json_api.py`.                                                                                                    |
-| Table bulk ops (`table.init`, `elem.drop`, `table.copy`, `table.grow`, `table.size`, `table.fill`) | `5.3-binary.instructions.spectec` | Tested | `0xFC 12-17` fully mapped with `TABLE_INIT`, `TABLE_COPY`, and `INDEX` immediate types. Dispatch covered by `tests/test_extended_ops.py`.                                                                                                                        |
-| Exception handling (`throw`, `throw_ref`, `try_table`)                                             | `5.3-binary.instructions.spectec` | Tested | `throw` (0x08), `throw_ref` (0x0A), and `try_table` (0x1F with full catch list) decoded. `TRY_TABLE_BLOCK` parses catch opcodes 0x00-0x03. Covered by `tests/test_extended_ops.py`.                                                                              |
-| GC / reference types (`0xFB` prefix, struct/array/ref ops)                                         | `5.3-binary.instructions.spectec` | Tested | All 31 `0xFB 0-30` opcodes in `OPCODES`. `BR_ON_CAST` (flags + label + 2 heaptypes) fully decoded. `tests/test_extended_ops.py` covers table completeness and dispatch for `array.len`, `struct.new`, `ref.test`.                                                |
-| SIMD / vector instructions (`0xFD` prefix)                                                         | `5.3-binary.instructions.spectec` | Tested | All standard SIMD opcodes 0-275 mapped, including relaxed SIMD. Load/store use `MEMARG`, `v128.const` uses `V128_CONST` (16 raw bytes), `i8x16.shuffle` uses `V128_SHUFFLE`, lane ops use `LANE_IDX` and `MEMARG_LANE`. Covered by `tests/test_extended_ops.py`. |
-| Threads / atomics (`0xFE` prefix)                                                                  | `5.3-binary.instructions.spectec` | Tested | All atomic operations mapped. `atomic.fence` uses `ATOMIC_FENCE` (reads reserved byte). All others use `MEMARG`. Covered by `tests/test_extended_ops.py`.                                                                                                        |
-| Unknown opcode resilience                                                                          | `5.3-binary.instructions.spectec` | Tested | Unsupported opcodes fall back to `unknown_<prefix>_<opcode>` rather than crashing. Covered by `tests/test_confidence_parser.py`.                                                                                                                                 |
+| Area                                                                                               | Spec reference                    | Status | Current behavior and evidence                                                                                                                                                                                                                                                                                    |
+| -------------------------------------------------------------------------------------------------- | --------------------------------- | ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Basic parametric instructions (`unreachable`, `nop`, `drop`, `select`)                             | `5.3-binary.instructions.spectec` | Tested | All mapped explicitly in `OPCODES`. Typed `select` with result type vector is handled via `SELECT_T` immediate dispatch. Covered by fixture disassembly tests.                                                                                                                                                   |
+| Block/control structure (`block`, `loop`, `if`, `else`, `end`)                                     | `5.3-binary.instructions.spectec` | Tested | Block signatures and expression depth tracking are implemented in `read_instructions()`. Covered by `control_flow.wat` and `complex_flow.wat`.                                                                                                                                                                   |
+| Branching (`br`, `br_if`, `br_table`, `return`)                                                    | `5.3-binary.instructions.spectec` | Tested | Core branch immediates are decoded. `br_table` target list decoded and printed. Covered by `tests/test_e2e.py` and `adversarial_ops.wat`.                                                                                                                                                                        |
+| Direct and indirect calls (`call`, `call_indirect`)                                                | `5.3-binary.instructions.spectec` | Tested | Direct index operands and `call_indirect` signature/table operands decoded. Covered by `call_indirect.wat` and `complex_flow.wat`.                                                                                                                                                                               |
+| Return-call extensions (`return_call`, `return_call_indirect`, `call_ref`, `return_call_ref`)      | `5.3-binary.instructions.spectec` | Tested | All four opcodes are in `OPCODES` with correct immediate types. Covered by `tests/test_extended_ops.py` and fixture-level `call_ref` disassembly in `call_refs.wat`.                                                                                                                                             |
+| Variable access (`local.get/set/tee`, `global.get/set`)                                            | `5.3-binary.instructions.spectec` | Tested | Index immediates decoded and printed. Covered by arithmetic, globals, and control-flow fixtures.                                                                                                                                                                                                                 |
+| Memory load/store with memarg                                                                      | `5.3-binary.instructions.spectec` | Tested | All scalar load/store instructions use the `MEMARG` decoder path, including memory64 large-offset fixtures. Covered by `memory_data.wat`, `complex_flow.wat`, and `load64.wat`.                                                                                                                                  |
+| Integer and float constants                                                                        | `5.3-binary.instructions.spectec` | Tested | `i32.const`, `i64.const`, `f32.const`, and `f64.const` immediates decoded. Edge signed immediates covered in parser tests and `adversarial_ops.wat`.                                                                                                                                                             |
+| Scalar numeric arithmetic and comparisons                                                          | `5.3-binary.instructions.spectec` | Tested | Full i32, i64, f32, f64 arithmetic, comparison, and conversion opcode sets are in `OPCODES`. Sign-extension opcodes (`0xC0-0xC4`) included. Covered by `tests/test_extended_ops.py`.                                                                                                                             |
+| Reference type instructions (`ref.null`, `ref.func`, `ref.eq`, etc.)                               | `5.3-binary.instructions.spectec` | Tested | `0xD0-0xD6` fully mapped. `ref.null` uses `HEAP_TYPE` immediate. `br_on_null`/`br_on_non_null` use `INDEX`. Covered by `tests/test_extended_ops.py`.                                                                                                                                                             |
+| Saturating truncation (`i32.trunc_sat_*`, `i64.trunc_sat_*`)                                       | `5.3-binary.instructions.spectec` | Tested | All eight `0xFC 0-7` opcodes in `OPCODES` with `NONE` immediate. Dispatch covered by `tests/test_extended_ops.py::test_dispatch_sat_trunc`.                                                                                                                                                                      |
+| Bulk memory (`memory.init`, `data.drop`, `memory.copy`, `memory.fill`)                             | `5.3-binary.instructions.spectec` | Tested | `0xFC 8-11` with correct binary operand order for `memory.init`. Covered by `tests/test_confidence_parser.py`, `tests/test_e2e.py`, `tests/test_json_api.py`.                                                                                                                                                    |
+| Table bulk ops (`table.init`, `elem.drop`, `table.copy`, `table.grow`, `table.size`, `table.fill`) | `5.3-binary.instructions.spectec` | Tested | `0xFC 12-17` fully mapped with `TABLE_INIT`, `TABLE_COPY`, and `INDEX` immediate types. Dispatch covered by `tests/test_extended_ops.py`.                                                                                                                                                                        |
+| Exception handling (`throw`, `throw_ref`, `try_table`)                                             | `5.3-binary.instructions.spectec` | Tested | `throw` (0x08), `throw_ref` (0x0A), and `try_table` (0x1F with full catch list) decoded. `TRY_TABLE_BLOCK` parses catch opcodes 0x00-0x03. Covered by `tests/test_extended_ops.py`.                                                                                                                              |
+| GC / reference types (`0xFB` prefix, struct/array/ref ops)                                         | `5.3-binary.instructions.spectec` | Tested | All 31 `0xFB 0-30` opcodes in `OPCODES`. `BR_ON_CAST` (flags + label + 2 heaptypes) fully decoded. `tests/test_extended_ops.py` covers table completeness and dispatch for `array.len`, `struct.new`, `ref.test`.                                                                                                |
+| SIMD / vector instructions (`0xFD` prefix)                                                         | `5.3-binary.instructions.spectec` | Tested | All standard SIMD opcodes 0-275 mapped, including relaxed SIMD and f16x8 half-precision ops (288-290, 304-316). Load/store use `MEMARG`, `v128.const` uses `V128_CONST` (16 raw bytes), `i8x16.shuffle` uses `V128_SHUFFLE`, lane ops use `LANE_IDX` and `MEMARG_LANE`. Covered by `tests/test_extended_ops.py`. |
+| Threads / atomics (`0xFE` prefix)                                                                  | `5.3-binary.instructions.spectec` | Tested | All atomic operations mapped. `atomic.fence` uses `ATOMIC_FENCE` (reads reserved byte). All others use `MEMARG`. Covered by `tests/test_extended_ops.py`.                                                                                                                                                        |
+| Unknown opcode resilience                                                                          | `5.3-binary.instructions.spectec` | Tested | Unsupported opcodes fall back to `unknown_<prefix>_<opcode>` and are summarized in `analysis.summary`. Covered by `tests/test_confidence_parser.py`.                                                                                                                                                             |
+| Wide arithmetic (`0xFC 19-22`)                                                                     | wide-arithmetic proposal          | Tested | `i64.add128`, `i64.sub128`, `i64.mul_wide_s/u`, no immediates. Covered by `tests/test_limits_opcodes_toolchain.py`.                                                                                                                                                                                              |
+| Half-precision scalar memory ops (`0xFC 48-49`)                                                    | half-precision proposal           | Tested | `f32.load_f16` / `f32.store_f16` with `MEMARG`. Covered by `tests/test_limits_opcodes_toolchain.py`.                                                                                                                                                                                                             |
 
 ### Interface and analysis coverage
 
@@ -202,6 +213,10 @@ Status terms used below:
 | CLI details mode (`-x`)                       | Tested          | `BinaryReaderObjdumpDetails` prints all section contents: types, imports, exports, globals, tables, memories, data segments, elements, tags, and code bodies. Covered by `tests/test_details.py`.    |
 | JSON-friendly library API                     | Tested          | `parse_wasm_file()` and related helpers return full semantic reports including types, imports, exports, globals, tables, memories, data segments, and elements. Covered in `tests/test_json_api.py`. |
 | Non-throwing parse errors for library callers | Tested          | Malformed inputs populate `errors` instead of forcing a traceback. Covered in parser and JSON API tests.                                                                                             |
+| Strings extraction (`--strings`, `strings[]`) | Tested          | ASCII and UTF-16LE extraction with linear-memory provenance plus secret/IoC screening. Covered by `tests/test_strings.py`.                                                                           |
+| Call graph, xrefs, reachability               | Tested          | Labeled `direct`/`indirect-approx`/`typed-approx` edges, import xrefs, export reachability, `--calls` tree. Covered by `tests/test_call_graph.py`.                                                   |
+| Toolchain fingerprint                         | Tested          | `producers` and `target_features` custom sections decoded into the `toolchain` block. Covered by `tests/test_limits_opcodes_toolchain.py`.                                                           |
+| Component Model binaries                      | Tested          | Preamble detection, import/export/canon sections, WASI 0.2/0.3 interface inventory, nested core module decode. Covered by `tests/test_component.py`.                                                 |
 | Full validation against the specification     | Not implemented | The current code decodes and reports binary structure; it does not implement the validation chapters from the bundled specification snapshot.                                                        |
 | Text-format parsing (`.wat` as input)         | Not implemented | The repository consumes `.wat` only through the external fixture build step with `wat2wasm`.                                                                                                         |
 
@@ -218,14 +233,23 @@ The library covers the full WebAssembly binary format at the decoding level. The
 The structured report currently contains:
 
 - `file`: source path or caller-supplied label,
-- `module_version`: wasm version from the module header, or `None` on parse failure,
+- `module_version`: wasm version from the module header, or `None` on parse failure (the raw 32-bit value for components, e.g. `65549`),
+- `is_component`: whether the binary is a Component Model artifact,
 - `section_count`: number of recorded sections,
 - `sections`: list of section dictionaries with `index`, `id`, `name`, `size`, and `offset`,
 - `function_count`: number of decoded function bodies,
 - `functions`: list of function dictionaries with `index`, `name`, `signature_index`, `offset`, `body_size`, `instruction_count`, and `instructions`,
-- `tables`: list of decoded table entries with `index`, `ref_type`, and `limits` (`min`, `max`, `is_64`),
-- `memories`: list of decoded memory entries with `index` and `limits` (`min`, `max`, `is_64`),
+- `tables`: list of decoded table entries with `index`, `ref_type`, and `limits` (`min`, `max`, `is_64`, `shared`, `page_size_log2`),
+- `memories`: list of decoded memory entries with `index` and the same `limits` shape,
+- `strings`: printable strings extracted from data segments (`segment_index`, `byte_offset`, `memory_offset`, `length`, `encoding`, `value`), capped at 1000 entries with `strings_truncated` set (extraction threshold and inclusion are controllable via the `strings_min_len` / `include_strings` API parameters),
+- `call_graph`: static call graph with `nodes`, labeled `edges` (`direct`, `indirect-approx`, `typed-approx`), `import_xrefs`, and `reachability`,
+- `toolchain`: `languages`, `processed_by`, `sdks`, and `target_features` decoded from the `producers` and `target_features` custom sections,
+- `component`: present for Component Model binaries — `component_version`, `layer_version`, `imports`, `exports`, `interfaces`, `interface_packages`, `canonical_options`, and fully decoded nested `core_modules`,
 - `errors`: list of parsing or file read errors.
+
+For component binaries the section lists are aggregations across all nested
+core modules; each entry carries a `core_module` index. See
+[MIGRATION.md](./MIGRATION.md) for the complete 1.x → 2.0.0 changes.
 
 Each instruction entry contains:
 
@@ -240,13 +264,14 @@ This shape is covered by `tests/test_json_api.py`.
 
 The JSON report includes an `analysis` object designed for analyst triage.
 
-- `summary`: overall `risk_score`, `risk_tier`, and `finding_count`,
-- `detections.wasi`: explicit WASI import detection (`detected`, `variants`, matched import modules/count),
+- `summary`: overall `risk_score`, `risk_tier`, `finding_count`, and unknown-opcode telemetry (`unknown_opcode_count`, `unknown_opcodes`),
+- `detections.wasi`: explicit WASI import detection (`detected`, `variants` including `preview1`/`preview2`/`preview3`, matched import modules/count; component interface names are included),
 - `detections.js_interface`: JavaScript-interface signals from imports/exports (`js`/`wbg` namespaces, `wasm:*` builtins such as `wasm:js-string`, and common glue symbol patterns),
-- `detections.format`: coarse format classification (`core`, `possible-component`, `invalid-core`) with evidence signals,
+- `detections.strings`: secret/IoC screening of extracted data-segment strings (URLs, AWS keys, JWTs, PEM headers, base64/hex blobs, high-entropy runs, mining indicators),
+- `detections.format`: format classification (`core`, `component`, `possible-component`, `invalid-core`) with evidence signals,
 - `capabilities`: inferred host capability tags from imports (for example `fs.path`, `network`, `process.terminate`),
 - `profiles.memory`: memory access density, `memory.grow`, bulk-memory activity, and total data segment bytes,
-- `profiles.control_flow`: dynamic dispatch metrics (`call_indirect`, `call_ref`) and table mutation counts,
+- `profiles.control_flow`: dynamic dispatch metrics (`call_indirect`, `call_ref`), table mutation counts, and export reachability (`export_reachable_functions`, `unreachable_functions`),
 - `profiles.compute`: loop depth and loop-contained memory/control-flow pressure,
 - `findings`: actionable rule-based results with stable ids and remediation guidance.
 
@@ -257,6 +282,8 @@ Current built-in finding ids:
 - `WASM-DOS-003`: memory growth in loop context.
 - `WASM-LOOP-004`: deep loop nesting amplification signal.
 - `WASM-FMT-005`: binary appears to be non-core or otherwise parse-incompatible for this decoder.
+- `WASM-JSCFG-006`: JS-exposed entrypoints combining dynamic dispatch and mutable table operations (evidence may include `paths_from_export`).
+- `WASM-STR-007`: credential-like or IoC strings embedded in data segments (high severity only for key/token/mining signals; bare URLs/domains report as medium).
 
 ## Error handling model
 
@@ -310,6 +337,8 @@ Representative fixtures include:
 - `wasi_preview2_like.wat` for WASI preview2-like namespace detection (`wasi:*` imports),
 - `js_interface.wat` for JavaScript embedding detection (`js`, `wbg`, and `wasm:js-string` imports),
 - `dos_growth_loop.wat` for loop + `memory.grow` DoS heuristics.
+- `strings_secrets.wat` for string extraction and embedded secret/IoC detection,
+- `call_graph.wat` for direct/indirect call edges, import xrefs, and reachability.
 
 These fixtures are used in `tests/test_e2e.py` to validate the disassembly output and in `tests/test_json_api.py` to validate the structured API.
 
@@ -319,6 +348,7 @@ The repository is a practical decoder, not a full specification implementation:
 
 - Spec validation (type checking, module-level structural constraints) is deliberately out of scope.
 - The custom `name` section decodes subsections 1 (function names) and 2 (local names); other subsections such as label names are skipped.
+- Component call-graph edges use per-core-module function index spaces; indices can collide across multiple core modules. Indirect and typed call edges are over-approximations by design.
 - Some rarely used init-expression forms in element and data segments fall back to a hex scan rather than full expression decoding.
 - The `analysis` layer is heuristic by design and is intended for triage, not formal proof of exploitability.
 

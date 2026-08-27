@@ -111,7 +111,8 @@ def test_parse_wasm_file_detects_wasi_preview2_like_imports():
 
     wasi = report["analysis"]["detections"]["wasi"]
     assert wasi["detected"] is True
-    assert "preview2-like" in wasi["variants"]
+    assert "preview2" in wasi["variants"]
+    assert "preview2-like" not in wasi["variants"]
     assert any(module.startswith("wasi:") for module in wasi["import_modules"])
 
 
@@ -330,14 +331,26 @@ def test_parse_wasm_file_captures_memory64_shared_limits():
     report = parse_wasm_file(_fixture_path("memory64_shared.wasm"))
 
     assert report["errors"] == []
-    assert report["memories"][0]["limits"] == {"min": 1, "max": 3, "is_64": True}
+    assert report["memories"][0]["limits"] == {
+        "min": 1,
+        "max": 3,
+        "is_64": True,
+        "shared": True,
+        "page_size_log2": None,
+    }
 
 
 def test_parse_wasm_file_captures_table_init64_tables_and_immediates():
     report = parse_wasm_file(_fixture_path("table_init64.wasm"))
 
     assert report["errors"] == []
-    assert report["tables"][2]["limits"] == {"min": 30, "max": 30, "is_64": True}
+    assert report["tables"][2]["limits"] == {
+        "min": 30,
+        "max": 30,
+        "is_64": True,
+        "shared": False,
+        "page_size_log2": None,
+    }
     assert any(
         ins["opcode"] == "table.init" and ins["immediates"] == [1, 2]
         for fn in report["functions"]

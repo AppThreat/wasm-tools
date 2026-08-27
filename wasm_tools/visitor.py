@@ -1,4 +1,4 @@
-from typing import Any, List
+from typing import Any, List, Optional
 
 from .models import (
     SECTION_NAMES,
@@ -111,6 +111,8 @@ class BinaryReaderObjdumpPrepass(BinaryReaderObjdumpBase):
                 minimum=kwargs["limits_min"],
                 maximum=kwargs.get("limits_max"),
                 is_64=kwargs.get("limits_64", False),
+                shared=kwargs.get("limits_shared", False),
+                page_size_log2=kwargs.get("limits_page_size_log2"),
             )
             if kind == "table"
             else None,
@@ -118,6 +120,8 @@ class BinaryReaderObjdumpPrepass(BinaryReaderObjdumpBase):
                 minimum=kwargs["limits_min"],
                 maximum=kwargs.get("limits_max"),
                 is_64=kwargs.get("limits_64", False),
+                shared=kwargs.get("limits_shared", False),
+                page_size_log2=kwargs.get("limits_page_size_log2"),
             )
             if kind == "memory"
             else None,
@@ -132,14 +136,38 @@ class BinaryReaderObjdumpPrepass(BinaryReaderObjdumpBase):
     def on_function(self, index: int, sig_index: int) -> None:
         self.objdump_state.function_types[index] = sig_index
 
-    def on_table(self, index: int, ref_type: str, mn: int, mx: Any, is64: bool) -> None:
-        entry = TableEntry(index=index, ref_type=ref_type, limits=Limits(mn, mx, is64))
+    def on_table(
+        self,
+        index: int,
+        ref_type: str,
+        mn: int,
+        mx: Any,
+        is64: bool,
+        shared: bool = False,
+        page_size_log2: Optional[int] = None,
+    ) -> None:
+        entry = TableEntry(
+            index=index,
+            ref_type=ref_type,
+            limits=Limits(mn, mx, is64, shared=shared, page_size_log2=page_size_log2),
+        )
         while len(self.objdump_state.tables) <= index:
             self.objdump_state.tables.append(None)  # type: ignore
         self.objdump_state.tables[index] = entry
 
-    def on_memory(self, index: int, mn: int, mx: Any, is64: bool) -> None:
-        entry = MemoryEntry(index=index, limits=Limits(mn, mx, is64))
+    def on_memory(
+        self,
+        index: int,
+        mn: int,
+        mx: Any,
+        is64: bool,
+        shared: bool = False,
+        page_size_log2: Optional[int] = None,
+    ) -> None:
+        entry = MemoryEntry(
+            index=index,
+            limits=Limits(mn, mx, is64, shared=shared, page_size_log2=page_size_log2),
+        )
         while len(self.objdump_state.memories) <= index:
             self.objdump_state.memories.append(None)  # type: ignore
         self.objdump_state.memories[index] = entry
@@ -194,6 +222,7 @@ class BinaryReaderObjdumpPrepass(BinaryReaderObjdumpBase):
         offset_expr: str,
         size: int,
         data: bytes,
+        offset_value: Optional[int] = None,
     ) -> None:
         entry = DataEntry(
             index=index,
@@ -202,6 +231,7 @@ class BinaryReaderObjdumpPrepass(BinaryReaderObjdumpBase):
             offset_expr=offset_expr,
             size=size,
             data=data,
+            offset_value=offset_value,
         )
         while len(self.objdump_state.data_segments) <= index:
             self.objdump_state.data_segments.append(None)  # type: ignore
@@ -215,6 +245,14 @@ class BinaryReaderObjdumpPrepass(BinaryReaderObjdumpBase):
 
     def on_data_count(self, count: int) -> None:
         self.objdump_state.data_count = count
+
+    def on_producers_field(self, field: str, entries: List[tuple]) -> None:
+        self.objdump_state.producers[field] = [
+            (str(n), str(v)) for n, v in entries
+        ]
+
+    def on_target_feature(self, enabled: bool, name: str) -> None:
+        self.objdump_state.target_features.append((enabled, name))
 
 
 class BinaryReaderObjdumpHeaders(BinaryReaderObjdumpBase):
@@ -328,16 +366,39 @@ class BinaryReaderObjdumpDetails(BinaryReaderObjdumpBase):
 
     # ── table section ─────────────────────────────────────────────────────
 
-    def on_table(self, index: int, ref_type: str, mn: int, mx: Any, is64: bool) -> None:
+    def on_table(
+        self,
+        index: int,
+        ref_type: str,
+        mn: int,
+        mx: Any,
+        is64: bool,
+        shared: bool = False,
+        page_size_log2: Optional[int] = None,
+    ) -> None:
         mx_str = f" max={mx}" if mx is not None else ""
-        print(f" - table[{index}]: {ref_type} min={mn}{mx_str}")
+        extra = " shared" if shared else ""
+        if page_size_log2 is not None:
+            extra += f" pagesize=2^{page_size_log2}"
+        print(f" - table[{index}]: {ref_type} min={mn}{mx_str}{extra}")
 
     # ── memory section ────────────────────────────────────────────────────
 
-    def on_memory(self, index: int, mn: int, mx: Any, is64: bool) -> None:
+    def on_memory(
+        self,
+        index: int,
+        mn: int,
+        mx: Any,
+        is64: bool,
+        shared: bool = False,
+        page_size_log2: Optional[int] = None,
+    ) -> None:
         mx_str = f" max={mx}" if mx is not None else ""
         addr = " i64" if is64 else ""
-        print(f" - memory[{index}]: pages: initial={mn}{mx_str}{addr}")
+        extra = " shared" if shared else ""
+        if page_size_log2 is not None:
+            extra += f" pagesize=2^{page_size_log2}"
+        print(f" - memory[{index}]: pages: initial={mn}{mx_str}{addr}{extra}")
 
     # ── global section ────────────────────────────────────────────────────
 
@@ -388,6 +449,7 @@ class BinaryReaderObjdumpDetails(BinaryReaderObjdumpBase):
         offset_expr: str,
         size: int,
         data: bytes,
+        offset_value: Optional[int] = None,
     ) -> None:
         if mode == "active":
             print(

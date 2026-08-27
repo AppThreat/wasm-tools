@@ -421,15 +421,19 @@ The `analysis` block is computed from the decoded data. It does not change parsi
 "summary": {
   "risk_score": 8,
   "risk_tier": "low",
-  "finding_count": 0
+  "finding_count": 0,
+  "unknown_opcode_count": 0,
+  "unknown_opcodes": []
 }
 ```
 
-| Field           | Range / values                  | Meaning                                        |
-| --------------- | ------------------------------- | ---------------------------------------------- |
-| `risk_score`    | 0 – 100 integer                 | Weighted sum of capability and finding scores. |
-| `risk_tier`     | `none`, `low`, `medium`, `high` | Bucketed label for the score.                  |
-| `finding_count` | integer                         | Number of active `findings` entries.           |
+| Field                  | Range / values                  | Meaning                                                                                                   |
+| ---------------------- | ------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| `risk_score`           | 0 – 100 integer                 | Weighted sum of capability and finding scores.                                                            |
+| `risk_tier`            | `none`, `low`, `medium`, `high` | Bucketed label for the score.                                                                             |
+| `finding_count`        | integer                         | Number of active `findings` entries.                                                                      |
+| `unknown_opcode_count` | integer                         | Instructions that fell back to `unknown_*` names — a signal the opcode table lags the binary's toolchain. |
+| `unknown_opcodes`      | list of strings                 | Distinct unknown opcode mnemonics.                                                                        |
 
 **Tier thresholds** (approximate — subject to change):
 
@@ -458,13 +462,13 @@ The `analysis` block is computed from the decoded data. It does not change parsi
 }
 ```
 
-| Field            | What it tells you                                                   |
-| ---------------- | ------------------------------------------------------------------- |
-| `detected`       | `true` if WASI imports were found.                                  |
-| `confidence`     | `high` = normative WASI namespace; `medium` = partial signals only. |
-| `import_modules` | Which WASI namespaces were present.                                 |
-| `import_count`   | How many WASI imports (more = more syscall surface).                |
-| `variants`       | Which WASI version(s): `preview1`, `preview2`, or both.             |
+| Field            | What it tells you                                                                                                        |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `detected`       | `true` if WASI imports were found.                                                                                       |
+| `confidence`     | `high` = normative WASI namespace; `medium` = partial signals only.                                                      |
+| `import_modules` | Which WASI namespaces were present.                                                                                      |
+| `import_count`   | How many WASI imports (more = more syscall surface).                                                                     |
+| `variants`       | Which WASI version(s): `preview1`, `preview2` (`wasi:*@0.2.x`), `preview3` (`wasi:*@0.3.x`, async components), `legacy`. |
 
 A WASI module is designed to run in a sandboxed CLI environment (like a container). It has access to virtual filesystem, network sockets, environment variables, process exit, and random numbers — but only those that the runner explicitly grants. The `capabilities` list (§6.5) shows the specific ones detected.
 
@@ -527,13 +531,41 @@ This detection fires when the module is designed to run inside a JavaScript envi
 }
 ```
 
-| `kind` value         | Meaning                                                        |
-| -------------------- | -------------------------------------------------------------- |
-| `core`               | Standard core WebAssembly module (the vast majority of files). |
-| `possible-component` | Byte patterns suggest a WebAssembly Component Model binary.    |
-| `invalid-core`       | Magic bytes match but structure is severely malformed.         |
+| `kind` value         | Meaning                                                                                                                                 |
+| -------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `core`               | Standard core WebAssembly module (the vast majority of files).                                                                          |
+| `component`          | Component Model binary (preamble version `0x0d`+ / layer 1). Fully parsed: interface inventory, nested core modules, canonical options. |
+| `possible-component` | Byte patterns suggest a component but this decoder could not identify it.                                                               |
+| `invalid-core`       | Magic bytes match but structure is severely malformed.                                                                                  |
 
-> **Tip:** `possible-component` files require a Component Model-aware tool to fully decode. This tool will parse what it can but may report parse errors on the component-specific sections.
+> **Tip:** For `component` files, read the top-level `component` block (interfaces, imports/exports, canon options, per-core-module reports) and the aggregated `imports`/`functions`/`strings` lists. Each aggregated entry carries a `core_module` index.
+
+---
+
+### 6.4a `detections.strings`
+
+Screening of strings extracted from data segments (see `strings[]`):
+
+| Signal                     | Meaning                                                     |
+| -------------------------- | ----------------------------------------------------------- |
+| `url`                      | `http(s)://`, `ws(s)://`, `ftp://` endpoints                |
+| `mining_indicator`         | `stratum+tcp`, cryptonight/monero/xmr markers               |
+| `aws_access_key`           | `AKIA`-prefixed access key IDs                              |
+| `jwt_token`                | `eyJ...` JSON Web Tokens                                    |
+| `pem_private_key`          | `-----BEGIN ... PRIVATE KEY-----` headers                   |
+| `ipv4` / `domain`          | Bare address/host indicators (outside URLs)                 |
+| `base64_blob` / `hex_blob` | Long encoded blobs                                          |
+| `high_entropy`             | Key-material-shaped printable runs (Shannon entropy >= 4.5) |
+
+A hit produces finding `WASM-STR-007` — severity `high` only for key/token/mining signals; bare URLs/domains (routine in real Rust/Emscripten binaries) report as `medium`. Credential-shaped samples are masked (AWS keys keep the `AKIA` prefix only, JWTs are truncated) so reports and CI logs do not carry live secrets; find the full strings in `strings[]` with their linear-memory offsets.
+
+---
+
+### 6.4b `strings[]`, `call_graph`, and `toolchain`
+
+- `strings[]`: `{segment_index, byte_offset, memory_offset, length, encoding, value}`. `memory_offset` maps the string into linear memory (`null` for passive segments). Use `--strings` from the CLI (the `--strings-min-len` threshold applies at extraction, so lowering it surfaces short strings); entries are capped at 1000 (`strings_truncated`). Library consumers can pass `strings_min_len`, `include_strings=False`, or `include_call_graph=False` to `parse_wasm_bytes`/`parse_wasm_file` to tune or skip these blocks.
+- `call_graph`: `nodes` (imported/exported flags, names), `edges` (`direct`, `indirect-approx` via element segments, `typed-approx` via signature types — the latter two are over-approximations), `import_xrefs` (which functions call each host import), and `reachability` (what is reachable from exports/start; `unreachable_functions` is dead code). CLI: `--calls <name-or-index>` prints a call tree.
+- `toolchain`: decoded `producers` (`languages`, `processed_by`, `sdks`) and `target_features` (which proposals the module says it uses).
 
 ---
 
