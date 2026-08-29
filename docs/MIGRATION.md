@@ -82,7 +82,7 @@ carries a `core_module` index attributing it to its originating module.
 - Finding **`WASM-STR-007`** ("Credential-like or IoC strings embedded in
   data segments", severity high, weight 20) fires on URL / mining /
   AWS-key / JWT / PEM signals.
-- `WASM-JSCFG-006` evidence optionally includes `paths_from_export` —
+- `WASM-JSCFG-006` evidence optionally includes `paths_from_export`,
   example function-index paths from an exported entrypoint to a dynamically
   dispatched function.
 - `WASM-FMT-005` no longer fires for successfully parsed components.
@@ -98,10 +98,10 @@ entries also carry `core_module`.
 
 Edges are `{from, to, kind, offset}`. `kind` is:
 
-- `direct` — exact `call`/`return_call` target.
-- `indirect-approx` — over-approximation via element segments for
+- `direct`: exact `call`/`return_call` target.
+- `indirect-approx`: over-approximation via element segments for
   `call_indirect`/`return_call_indirect`.
-- `typed-approx` — over-approximation via signature types for
+- `typed-approx`: over-approximation via signature types for
   `call_ref`/`return_call_ref`.
 
 Treat `*-approx` edges as candidate call targets, not ground truth. The edge
@@ -147,10 +147,10 @@ In `wasm_tools/api.py`:
 
 New modules:
 
-- `wasm_tools/strings.py` — `extract_strings(segments, min_len, max_entries)`,
+- `wasm_tools/strings.py`: `extract_strings(segments, min_len, max_entries)`,
   `analyze_strings(entries)`.
-- `wasm_tools/graph.py` — `build_call_graph(...)`, `sample_paths(...)`.
-- `wasm_tools/component.py` — `detect_component(data)`,
+- `wasm_tools/graph.py`: `build_call_graph(...)`, `sample_paths(...)`.
+- `wasm_tools/component.py`: `detect_component(data)`,
   `parse_component_bytes(data, core_parse=...)`.
 
 ---
@@ -180,10 +180,10 @@ includes the `component` block and aggregated sections.
 
 ## Opcode and limits decoding changes
 
-- Wide arithmetic (`0xFC` sub-opcodes 19–22, no immediates):
+- Wide arithmetic (`0xFC` sub-opcodes 19-22, no immediates):
   `i64.add128`, `i64.sub128`, `i64.mul_wide_s`, `i64.mul_wide_u`.
 - Half precision: `f32.load_f16` / `f32.store_f16` (`0xFC` 48/49, memarg) and
-  `f16x8.*` SIMD ops (`0xFD` 288–290 lane ops, 304–316 unary/binary). The
+  `f16x8.*` SIMD ops (`0xFD` 288-290 lane ops, 304-316 unary/binary). The
   fp16 proposal defines no new valtype byte; `f16` exists only as SIMD lanes.
 - Limits flags: bit 1 (`shared`) is now surfaced, and bit 3 (custom page
   size) consumes the trailing `page_size_log2` u32. **Bug fix**: binaries
@@ -207,4 +207,4 @@ includes the `component` block and aggregated sections.
 5. If you unpack `read_limits()` or `read_init_expr()` results, update the
    tuple arity.
 6. Consider opting into the new surfaces (`strings`, `call_graph`,
-   `toolchain`) — they are additive and cheap to ignore.
+   `toolchain`) because they are additive and cheap to ignore.

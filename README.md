@@ -1,390 +1,70 @@
 # wasm-tools
 
-`wasm-tools` is a pure-Python WebAssembly parser and disassembler. It is designed around binary decoding and callback-based visitors rather than a large object model. The project currently focuses on practical inspection of `.wasm` binaries, objdump-style disassembly, and programmatic extraction of decoded instructions for integration into other tooling.
+`wasm-tools` is a pure-Python WebAssembly parser, disassembler, and security triage toolkit. It decodes core modules and Component Model binaries, produces objdump-style disassembly, extracts strings with linear-memory provenance, builds a static call graph, and emits a structured JSON report with capability and risk analysis. It never executes the code it parses, and the library has zero runtime dependencies.
 
 [![AI-DECLARATION: auto](https://img.shields.io/badge/䷼%20AI--DECLARATION-auto-ede9fe?labelColor=ede9fe)](./AI-DECLARATION.md)
 
-## What this project is for
+## Documentation site
 
-This repository is useful when you need a lightweight WebAssembly parser that can:
+The full documentation is published at [appthreat.github.io/wasm-tools](https://appthreat.github.io/wasm-tools/) and lives in this repository under [`docs/`](./docs/). The site is plain markdown served by docsify, so every page is readable both on GitHub and in the browser. Highlights:
 
-- inspect a binary module without depending on native parsing libraries,
-- produce readable instruction traces for analyst review,
-- expose structured instruction data as Python dictionaries or JSON,
-- behave safely on malformed or truncated input by reporting parser errors through callbacks instead of crashing the caller.
+| Page                                              | Contents                                         |
+| ------------------------------------------------- | ------------------------------------------------ |
+| [Getting started](./docs/GETTING_STARTED.md)      | Installation and first commands                  |
+| [CLI reference](./docs/CLI.md)                    | Every flag, output format, and index semantics   |
+| [Format primer](./docs/FORMAT_PRIMER.md)          | What the bytes in a `.wasm` file mean            |
+| [JSON report reference](./docs/JSON_REFERENCE.md) | The machine-readable contract                    |
+| [Findings and signals](./docs/FINDINGS.md)        | Every analysis rule, threshold, and severity     |
+| [Analyst guide](./docs/ANALYST_GUIDE.md)          | Triage recipes for unknown binaries              |
+| Lessons 1 to 10                                   | Hands-on tutorials against the repo fixtures     |
+| [Architecture](./docs/ARCHITECTURE.md)            | Parser internals and design decisions            |
+| [Development guide](./docs/DEVELOPMENT.md)        | Extending opcodes, sections, visitors, and rules |
 
-For a security engineering audience, the main value is that the code path is short and inspectable. Most behavior lives in four files:
-
-- `wasm_tools/parser.py` for binary decoding and traversal,
-- `wasm_tools/opcodes.py` for opcode and immediate metadata,
-- `wasm_tools/visitor.py` for human-readable output,
-- `wasm_tools/api.py` for library-first structured output.
-
-## Command-line usage
-
-The installed console script is `wasm-tools`, as defined in `pyproject.toml`.
-
-Disassemble a fixture module:
+## Quick start
 
 ```bash
-python -m wasm_tools.cli tests/fixtures/simple_add.wasm -d
+pip install wasm-tools
+wasm-tools module.wasm --headers     # section map
+wasm-tools module.wasm -d            # disassembly
+wasm-tools module.wasm --json --analysis-only   # risk tier, capabilities, findings
 ```
 
-If installed as a package, the equivalent entrypoint is:
-
-```bash
-wasm-tools tests/fixtures/simple_add.wasm -d
-```
-
-Current CLI flags in `wasm_tools/cli.py`:
-
-- `-h`, `--headers` — print section header table with ids, sizes, and offsets
-- `-x`, `--details` — print section contents: type signatures, imports, exports, globals, tables, memories, data segments, elements, tags, and code body summaries
-- `-d`, `--disassemble` — decode and print function body instructions
-- `--strings` — extract printable strings from data segments with linear-memory provenance
-- `--strings-min-len N` — minimum string length for `--strings`/`--json`, applied at extraction (default 5)
-- `--no-strings` / `--no-call-graph` — skip the strings / call-graph derived blocks in `--json` reports
-- `--calls FUNC` — print an outgoing call tree for a function given by name or index
-- `--json` — print a minified JSON report to stdout
-- `--json-out PATH` — write a minified JSON report to `PATH`
-- `--analysis-only` — with `--json` and/or `--json-out`, emit only the high-level `analysis` object
-
-With no flags, `--details` is the default.
-
-Component-model binaries (preamble version `0x0d`+ / layer 1) are detected
-automatically: `-x`/`--headers` print a component summary, `-d` disassembles
-each nested core module, and `--json` includes the `component` block with the
-full interface inventory.
-
-Index notes for CLI output:
-
-- function/global/table/memory/tag indices are printed in module-global index space,
-- locally-defined function bodies therefore start at `func[imported_function_count]` when function imports are present,
-- section detail headers use entry counts (for example `Function[3]`, `Code[3]`, `Data[1]`) and `DataCount` prints the decoded count value.
-
-Write a minified JSON report to a file:
-
-```bash
-wasm-tools tests/fixtures/simple_add.wasm --json-out simple_add.json
-```
-
-Print a minified JSON report to stdout:
-
-```bash
-wasm-tools tests/fixtures/simple_add.wasm --json
-```
-
-Print only the high-level analysis object to stdout:
-
-```bash
-wasm-tools tests/fixtures/wasi_capabilities.wasm --json --analysis-only
-```
-
-Use both JSON options together to write a file and print the same payload:
-
-```bash
-wasm-tools tests/fixtures/simple_add.wasm --json --json-out simple_add.json
-```
-
-Write only the analysis object to a file:
-
-```bash
-wasm-tools tests/fixtures/dos_growth_loop.wasm --json-out analysis.json --analysis-only
-```
-
-## Library usage
-
-### Parse from a file
+From Python:
 
 ```python
 from wasm_tools.api import parse_wasm_file
 
-report = parse_wasm_file("tests/fixtures/simple_add.wasm")
-print(report["module_version"])
-print(report["function_count"])
-print(report["functions"][0]["instructions"])
+report = parse_wasm_file("module.wasm")
+print(report["analysis"]["summary"]["risk_tier"])
+for finding in report["analysis"]["findings"]:
+    print(finding["id"], finding["severity"], finding["title"])
 ```
 
-### Parse from bytes and emit JSON
+Every command is safe on untrusted files: parse failures land in `report["errors"]` instead of raising, and nothing in the pipeline evaluates the decoded code.
 
-```python
-from wasm_tools.api import parse_wasm_bytes_json
+## What the tool reports
 
-with open("tests/fixtures/unicode_names.wasm", "rb") as wasm_file:
-    print(parse_wasm_bytes_json(wasm_file.read(), filename="unicode_names.wasm"))
-```
+The JSON report (documented field by field in the [reference](./docs/JSON_REFERENCE.md)) includes section tables, function bodies with decoded instructions, imports and exports, memory and table limits, data segments, extracted strings with secret and IoC screening, a labeled call graph with reachability, toolchain fingerprints from `producers` and `target_features` custom sections, and, for Component Model binaries, the full interface inventory with per-core-module reports.
+
+The `analysis` layer on top is heuristic by design and intended for triage. It infers host capability tokens (`fs.path`, `network`, `process.terminate`, and others), detects WASI and JavaScript-interface modules, classifies the binary format, computes behavior profiles, and raises stable-id findings (`WASM-CAP-001` through `WASM-STR-007`) with severity, evidence, and remediation text. Exact rule behavior is in [FINDINGS.md](./docs/FINDINGS.md).
+
+## Supported coverage
+
+The decoder covers the WebAssembly binary format through the post-3.0 proposals: SIMD, threads, GC, exception handling, memory64 and table64, wide arithmetic, half-precision, custom page sizes, and shared limits, plus Component Model binaries. The [coverage matrix](./docs/COVERAGE.md) records implementation status per area against the bundled spec snapshot under `specification/wasm-latest/`. Spec validation and text-format (`.wat`) parsing are deliberate scope exclusions; the tool decodes and reports, it does not judge correctness.
 
 ## Trust and provenance
 
-The source code in this repository was fully generated by AI assistants, with any human edits limited to formatting or minor changes. For a technical reader, the practical implication is simple: treat the codebase as useful but review every line of code carefully. Review parser behavior, test coverage, and known gaps before depending on it in a security workflow.
+The source code in this repository was fully generated by AI assistants, with human edits limited to formatting and minor changes. Treat the codebase as useful but review it before depending on it in a security workflow. The repository reflects that posture: parser failures are covered by malformed-input tests, end-to-end tests assert exact disassembly substrings, and the [error model](./docs/ARCHITECTURE.md) keeps malformed files from crashing batch pipelines.
 
-The repository itself already reflects this review posture:
-
-- parser failures are covered by unit tests for malformed input,
-- end-to-end tests assert exact disassembly substrings,
-- CLI and JSON outputs use module-global index spaces for functions, globals, tables, memories, and tags, including imported-entity offsets.
-
-## Architecture
-
-A detailed description of the WebAssembly binary format, the parser internals, visitor pattern, two-pass execution model, and security-relevant design decisions is in [ARCHITECTURE.md](./ARCHITECTURE.md).
-
-The short version:
-
-`BinaryReader` in `wasm_tools/parser.py` owns the binary walk. It reads the module header, iterates sections, and decodes function bodies instruction by instruction. It does not build a full AST. Instead, it emits parser events to a delegate object. The parser checks callbacks with `hasattr(...)` before calling them, so a visitor only needs to implement the hooks it cares about.
-
-The CLI and the JSON API both run the parse twice. The first pass collects names and type information into `ObjdumpState`. The second pass uses that state to produce disassembly, section details, or a structured JSON report. The shared state lives in `wasm_tools/models.py`.
-
-`wasm_tools/opcodes.py` defines the mapping from `(prefix, opcode)` to `(mnemonic, immediate type)`. The parser uses this table inside `BinaryReader.read_instructions()` to decide how many bytes to consume. When extending the instruction set, only this table and the immediate dispatch branches in the parser need to change.
-
-## Relationship to the specification
-
-The repository includes a local specification snapshot under `specification/wasm-latest/`. The most relevant files for current implementation work are:
-
-- `specification/wasm-latest/5.3-binary.instructions.spectec`
-- `specification/wasm-latest/5.4-binary.modules.spectec`
-- `specification/wasm-latest/6.3-text.instructions.spectec`
-
-These files are useful when validating opcode encodings, section layouts, and text-to-binary expectations. The current parser is not a full implementation of everything described by the latest specification snapshot. It implements a practical subset and falls back to `unknown_<prefix>_<opcode>` names for unsupported instructions.
-
-## Spec coverage matrix
-
-This matrix is a planning aid, not a certification statement. It reflects what the current codebase does today based on `wasm_tools/parser.py`, `wasm_tools/opcodes.py`, `wasm_tools/visitor.py`, `wasm_tools/api.py`, and the current test suite.
-
-Status terms used below:
-
-- `Tested`: implemented and covered by the current automated tests.
-- `Partial`: implemented in a limited way, or traversed without full semantic decoding.
-- `Known gap`: explicitly tracked as missing behavior in tests.
-- `Not implemented or unverified`: no support or no current evidence in tests.
-
-### Module and section coverage
-
-| Area                                               | Spec reference               | Status  | Current behavior and evidence                                                                                                                                                                                 |
-| -------------------------------------------------- | ---------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Module header and version                          | `5.4-binary.modules.spectec` | Tested  | Validates magic and version in `BinaryReader._do_read_module()`. Error cases for short files and bad magic are covered in `tests/test_parser.py`.                                                             |
-| Section framing and bounds checks                  | `5.4-binary.modules.spectec` | Tested  | Reads section id and size, checks file bounds, and reports errors through `on_error`. Covered by truncated section tests.                                                                                     |
-| Custom sections, generic                           | `5.4-binary.modules.spectec` | Partial | Parser reads custom section name and skips unknown payloads. The JSON API records the custom section name, but does not decode arbitrary custom payloads.                                                     |
-| Custom `name` section for function and local names | `5.4-binary.modules.spectec` | Tested  | Subsections 1 (function names) and 2 (local names) are decoded and stored in `ObjdumpState`. Names appear in disassembly and JSON reports. Covered by `custom_name.wasm` and `unicode_names.wat`.             |
-| Type section                                       | `5.4-binary.modules.spectec` | Tested  | Full function type decoding with GC subtype / rec-type wrappers. Params and results stored as `FuncType` in `ObjdumpState.types` and surfaced in `--details`, JSON `types[]`, and `tests/test_details.py`.    |
-| Import section                                     | `5.4-binary.modules.spectec` | Tested  | All five import kinds (func, table, memory, global, tag) fully decoded into `ImportEntry` with kind-specific fields. Exposed in `--details` output, JSON `imports[]`, and covered by `tests/test_details.py`. |
-| Function section                                   | `5.4-binary.modules.spectec` | Tested  | Function signature indices decoded and stored via `on_function`. Used in prepass and JSON reports.                                                                                                            |
-| Table section                                      | `5.4-binary.modules.spectec` | Tested  | Reference type and limits decoded into `TableEntry`. Exposed in `--details` and JSON `tables[]`.                                                                                                              |
-| Memory section                                     | `5.4-binary.modules.spectec` | Tested  | Limits decoded (i32/i64 variants, shared flag, and custom page size exponents) into `MemoryEntry`. Exposed in `--details` and JSON `memories[]`.                                                              |
-| Global section                                     | `5.4-binary.modules.spectec` | Tested  | Value type, mutability, and constant init expression decoded into `GlobalEntry`. Exposed in `--details` and JSON `globals[]`.                                                                                 |
-| Export section                                     | `5.4-binary.modules.spectec` | Tested  | All five export kinds decoded into `ExportEntry`. Exposed in `--details` and JSON `exports[]`.                                                                                                                |
-| Start section                                      | `5.4-binary.modules.spectec` | Tested  | Start function index stored and surfaced in JSON `start_function` field and `--details` output.                                                                                                               |
-| Element section                                    | `5.4-binary.modules.spectec` | Tested  | All 8 element segment variants decoded, with mode, ref type, table index, offset expression, and function index list stored in `ElementEntry`.                                                                |
-| Code section and function bodies                   | `5.4-binary.modules.spectec` | Tested  | Local declaration headers are consumed, instructions are decoded, and end-of-body tracking is implemented. Covered heavily by `tests/test_e2e.py` and `tests/test_json_api.py`.                               |
-| Data section                                       | `5.4-binary.modules.spectec` | Tested  | Active (mem 0), passive, and active (mem x) variants decoded into `DataEntry`. Exposed in `--details` and JSON `data_segments[]`. Covered by `bulk_memory.wat` and `memory_data.wat`.                         |
-| Data count section                                 | `5.4-binary.modules.spectec` | Tested  | Data count is decoded and forwarded to delegates via `on_data_count`.                                                                                                                                         |
-| Tag section                                        | `5.4-binary.modules.spectec` | Tested  | Tag entries decoded into `TagEntry` with type index. Exposed in `--details` and JSON `tags[]`.                                                                                                                |
-
-### Instruction coverage
-
-| Area                                                                                               | Spec reference                    | Status | Current behavior and evidence                                                                                                                                                                                                                                                                                    |
-| -------------------------------------------------------------------------------------------------- | --------------------------------- | ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Basic parametric instructions (`unreachable`, `nop`, `drop`, `select`)                             | `5.3-binary.instructions.spectec` | Tested | All mapped explicitly in `OPCODES`. Typed `select` with result type vector is handled via `SELECT_T` immediate dispatch. Covered by fixture disassembly tests.                                                                                                                                                   |
-| Block/control structure (`block`, `loop`, `if`, `else`, `end`)                                     | `5.3-binary.instructions.spectec` | Tested | Block signatures and expression depth tracking are implemented in `read_instructions()`. Covered by `control_flow.wat` and `complex_flow.wat`.                                                                                                                                                                   |
-| Branching (`br`, `br_if`, `br_table`, `return`)                                                    | `5.3-binary.instructions.spectec` | Tested | Core branch immediates are decoded. `br_table` target list decoded and printed. Covered by `tests/test_e2e.py` and `adversarial_ops.wat`.                                                                                                                                                                        |
-| Direct and indirect calls (`call`, `call_indirect`)                                                | `5.3-binary.instructions.spectec` | Tested | Direct index operands and `call_indirect` signature/table operands decoded. Covered by `call_indirect.wat` and `complex_flow.wat`.                                                                                                                                                                               |
-| Return-call extensions (`return_call`, `return_call_indirect`, `call_ref`, `return_call_ref`)      | `5.3-binary.instructions.spectec` | Tested | All four opcodes are in `OPCODES` with correct immediate types. Covered by `tests/test_extended_ops.py` and fixture-level `call_ref` disassembly in `call_refs.wat`.                                                                                                                                             |
-| Variable access (`local.get/set/tee`, `global.get/set`)                                            | `5.3-binary.instructions.spectec` | Tested | Index immediates decoded and printed. Covered by arithmetic, globals, and control-flow fixtures.                                                                                                                                                                                                                 |
-| Memory load/store with memarg                                                                      | `5.3-binary.instructions.spectec` | Tested | All scalar load/store instructions use the `MEMARG` decoder path, including memory64 large-offset fixtures. Covered by `memory_data.wat`, `complex_flow.wat`, and `load64.wat`.                                                                                                                                  |
-| Integer and float constants                                                                        | `5.3-binary.instructions.spectec` | Tested | `i32.const`, `i64.const`, `f32.const`, and `f64.const` immediates decoded. Edge signed immediates covered in parser tests and `adversarial_ops.wat`.                                                                                                                                                             |
-| Scalar numeric arithmetic and comparisons                                                          | `5.3-binary.instructions.spectec` | Tested | Full i32, i64, f32, f64 arithmetic, comparison, and conversion opcode sets are in `OPCODES`. Sign-extension opcodes (`0xC0-0xC4`) included. Covered by `tests/test_extended_ops.py`.                                                                                                                             |
-| Reference type instructions (`ref.null`, `ref.func`, `ref.eq`, etc.)                               | `5.3-binary.instructions.spectec` | Tested | `0xD0-0xD6` fully mapped. `ref.null` uses `HEAP_TYPE` immediate. `br_on_null`/`br_on_non_null` use `INDEX`. Covered by `tests/test_extended_ops.py`.                                                                                                                                                             |
-| Saturating truncation (`i32.trunc_sat_*`, `i64.trunc_sat_*`)                                       | `5.3-binary.instructions.spectec` | Tested | All eight `0xFC 0-7` opcodes in `OPCODES` with `NONE` immediate. Dispatch covered by `tests/test_extended_ops.py::test_dispatch_sat_trunc`.                                                                                                                                                                      |
-| Bulk memory (`memory.init`, `data.drop`, `memory.copy`, `memory.fill`)                             | `5.3-binary.instructions.spectec` | Tested | `0xFC 8-11` with correct binary operand order for `memory.init`. Covered by `tests/test_confidence_parser.py`, `tests/test_e2e.py`, `tests/test_json_api.py`.                                                                                                                                                    |
-| Table bulk ops (`table.init`, `elem.drop`, `table.copy`, `table.grow`, `table.size`, `table.fill`) | `5.3-binary.instructions.spectec` | Tested | `0xFC 12-17` fully mapped with `TABLE_INIT`, `TABLE_COPY`, and `INDEX` immediate types. Dispatch covered by `tests/test_extended_ops.py`.                                                                                                                                                                        |
-| Exception handling (`throw`, `throw_ref`, `try_table`)                                             | `5.3-binary.instructions.spectec` | Tested | `throw` (0x08), `throw_ref` (0x0A), and `try_table` (0x1F with full catch list) decoded. `TRY_TABLE_BLOCK` parses catch opcodes 0x00-0x03. Covered by `tests/test_extended_ops.py`.                                                                                                                              |
-| GC / reference types (`0xFB` prefix, struct/array/ref ops)                                         | `5.3-binary.instructions.spectec` | Tested | All 31 `0xFB 0-30` opcodes in `OPCODES`. `BR_ON_CAST` (flags + label + 2 heaptypes) fully decoded. `tests/test_extended_ops.py` covers table completeness and dispatch for `array.len`, `struct.new`, `ref.test`.                                                                                                |
-| SIMD / vector instructions (`0xFD` prefix)                                                         | `5.3-binary.instructions.spectec` | Tested | All standard SIMD opcodes 0-275 mapped, including relaxed SIMD and f16x8 half-precision ops (288-290, 304-316). Load/store use `MEMARG`, `v128.const` uses `V128_CONST` (16 raw bytes), `i8x16.shuffle` uses `V128_SHUFFLE`, lane ops use `LANE_IDX` and `MEMARG_LANE`. Covered by `tests/test_extended_ops.py`. |
-| Threads / atomics (`0xFE` prefix)                                                                  | `5.3-binary.instructions.spectec` | Tested | All atomic operations mapped. `atomic.fence` uses `ATOMIC_FENCE` (reads reserved byte). All others use `MEMARG`. Covered by `tests/test_extended_ops.py`.                                                                                                                                                        |
-| Unknown opcode resilience                                                                          | `5.3-binary.instructions.spectec` | Tested | Unsupported opcodes fall back to `unknown_<prefix>_<opcode>` and are summarized in `analysis.summary`. Covered by `tests/test_confidence_parser.py`.                                                                                                                                                             |
-| Wide arithmetic (`0xFC 19-22`)                                                                     | wide-arithmetic proposal          | Tested | `i64.add128`, `i64.sub128`, `i64.mul_wide_s/u`, no immediates. Covered by `tests/test_limits_opcodes_toolchain.py`.                                                                                                                                                                                              |
-| Half-precision scalar memory ops (`0xFC 48-49`)                                                    | half-precision proposal           | Tested | `f32.load_f16` / `f32.store_f16` with `MEMARG`. Covered by `tests/test_limits_opcodes_toolchain.py`.                                                                                                                                                                                                             |
-
-### Interface and analysis coverage
-
-| Area                                          | Status          | Current behavior and evidence                                                                                                                                                                        |
-| --------------------------------------------- | --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| CLI disassembly mode (`-d`)                   | Tested          | Covered by `tests/test_e2e.py` with exact substring assertions across all fixture files.                                                                                                             |
-| CLI headers mode (`--headers`)                | Tested          | `BinaryReaderObjdumpHeaders` prints section id, name, size, and offset. Covered by `tests/test_details.py`.                                                                                          |
-| CLI details mode (`-x`)                       | Tested          | `BinaryReaderObjdumpDetails` prints all section contents: types, imports, exports, globals, tables, memories, data segments, elements, tags, and code bodies. Covered by `tests/test_details.py`.    |
-| JSON-friendly library API                     | Tested          | `parse_wasm_file()` and related helpers return full semantic reports including types, imports, exports, globals, tables, memories, data segments, and elements. Covered in `tests/test_json_api.py`. |
-| Non-throwing parse errors for library callers | Tested          | Malformed inputs populate `errors` instead of forcing a traceback. Covered in parser and JSON API tests.                                                                                             |
-| Strings extraction (`--strings`, `strings[]`) | Tested          | ASCII and UTF-16LE extraction with linear-memory provenance plus secret/IoC screening. Covered by `tests/test_strings.py`.                                                                           |
-| Call graph, xrefs, reachability               | Tested          | Labeled `direct`/`indirect-approx`/`typed-approx` edges, import xrefs, export reachability, `--calls` tree. Covered by `tests/test_call_graph.py`.                                                   |
-| Toolchain fingerprint                         | Tested          | `producers` and `target_features` custom sections decoded into the `toolchain` block. Covered by `tests/test_limits_opcodes_toolchain.py`.                                                           |
-| Component Model binaries                      | Tested          | Preamble detection, import/export/canon sections, WASI 0.2/0.3 interface inventory, nested core module decode. Covered by `tests/test_component.py`.                                                 |
-| Full validation against the specification     | Not implemented | The current code decodes and reports binary structure; it does not implement the validation chapters from the bundled specification snapshot.                                                        |
-| Text-format parsing (`.wat` as input)         | Not implemented | The repository consumes `.wat` only through the external fixture build step with `wat2wasm`.                                                                                                         |
-
-### How to use this matrix
-
-The library covers the full WebAssembly binary format at the decoding level. The remaining gaps are deliberate scope choices rather than missing work items:
-
-1. Spec validation (type checking, structural constraints from chapters 2 and 3 of the spec) is not the goal of this library. Validation belongs in a downstream consumer such as a language runtime.
-2. Text-format (`.wat`) input is handled externally by WABT and is not in scope.
-3. The specification snapshot is kept locally under `specification/wasm-latest/` to serve as an authoritative reference during development but is not shipped with the distributed package.
-
-### Report schema
-
-The structured report currently contains:
-
-- `file`: source path or caller-supplied label,
-- `module_version`: wasm version from the module header, or `None` on parse failure (the raw 32-bit value for components, e.g. `65549`),
-- `is_component`: whether the binary is a Component Model artifact,
-- `section_count`: number of recorded sections,
-- `sections`: list of section dictionaries with `index`, `id`, `name`, `size`, and `offset`,
-- `function_count`: number of decoded function bodies,
-- `functions`: list of function dictionaries with `index`, `name`, `signature_index`, `offset`, `body_size`, `instruction_count`, and `instructions`,
-- `tables`: list of decoded table entries with `index`, `ref_type`, and `limits` (`min`, `max`, `is_64`, `shared`, `page_size_log2`),
-- `memories`: list of decoded memory entries with `index` and the same `limits` shape,
-- `strings`: printable strings extracted from data segments (`segment_index`, `byte_offset`, `memory_offset`, `length`, `encoding`, `value`), capped at 1000 entries with `strings_truncated` set (extraction threshold and inclusion are controllable via the `strings_min_len` / `include_strings` API parameters),
-- `call_graph`: static call graph with `nodes`, labeled `edges` (`direct`, `indirect-approx`, `typed-approx`), `import_xrefs`, and `reachability`,
-- `toolchain`: `languages`, `processed_by`, `sdks`, and `target_features` decoded from the `producers` and `target_features` custom sections,
-- `component`: present for Component Model binaries — `component_version`, `layer_version`, `imports`, `exports`, `interfaces`, `interface_packages`, `canonical_options`, and fully decoded nested `core_modules`,
-- `errors`: list of parsing or file read errors.
-
-For component binaries the section lists are aggregations across all nested
-core modules; each entry carries a `core_module` index. See
-[MIGRATION.md](./MIGRATION.md) for the complete 1.x → 2.0.0 changes.
-
-Each instruction entry contains:
-
-- `offset`: byte offset used by the parser when the opcode was decoded,
-- `opcode`: mnemonic from `OPCODES` or an `unknown_...` fallback,
-- `immediates`: decoded immediate values in parser order,
-- `decode_incomplete`: present only when a function body ended with a partially decoded instruction record.
-
-This shape is covered by `tests/test_json_api.py`.
-
-### High-level security analysis
-
-The JSON report includes an `analysis` object designed for analyst triage.
-
-- `summary`: overall `risk_score`, `risk_tier`, `finding_count`, and unknown-opcode telemetry (`unknown_opcode_count`, `unknown_opcodes`),
-- `detections.wasi`: explicit WASI import detection (`detected`, `variants` including `preview1`/`preview2`/`preview3`, matched import modules/count; component interface names are included),
-- `detections.js_interface`: JavaScript-interface signals from imports/exports (`js`/`wbg` namespaces, `wasm:*` builtins such as `wasm:js-string`, and common glue symbol patterns),
-- `detections.strings`: secret/IoC screening of extracted data-segment strings (URLs, AWS keys, JWTs, PEM headers, base64/hex blobs, high-entropy runs, mining indicators),
-- `detections.format`: format classification (`core`, `component`, `possible-component`, `invalid-core`) with evidence signals,
-- `capabilities`: inferred host capability tags from imports (for example `fs.path`, `network`, `process.terminate`),
-- `profiles.memory`: memory access density, `memory.grow`, bulk-memory activity, and total data segment bytes,
-- `profiles.control_flow`: dynamic dispatch metrics (`call_indirect`, `call_ref`), table mutation counts, and export reachability (`export_reachable_functions`, `unreachable_functions`),
-- `profiles.compute`: loop depth and loop-contained memory/control-flow pressure,
-- `findings`: actionable rule-based results with stable ids and remediation guidance.
-
-Current built-in finding ids:
-
-- `WASM-CAP-001`: filesystem and network host capabilities imported together.
-- `WASM-CFG-002`: indirect call surface combined with mutable table operations.
-- `WASM-DOS-003`: memory growth in loop context.
-- `WASM-LOOP-004`: deep loop nesting amplification signal.
-- `WASM-FMT-005`: binary appears to be non-core or otherwise parse-incompatible for this decoder.
-- `WASM-JSCFG-006`: JS-exposed entrypoints combining dynamic dispatch and mutable table operations (evidence may include `paths_from_export`).
-- `WASM-STR-007`: credential-like or IoC strings embedded in data segments (high severity only for key/token/mining signals; bare URLs/domains report as medium).
-
-## Error handling model
-
-The parser does not re-raise `WasmParseError` by default. `BinaryReader.read_module()` catches parse exceptions and forwards the message to `delegate.on_error(...)` when that callback exists.
-
-This behavior is important for integration scenarios:
-
-- command-line flows can report errors without a Python traceback,
-- library callers can collect structured failure information,
-- fuzzing or batch inspection pipelines can continue after a malformed file.
-
-Unit tests cover this behavior in `tests/test_parser.py` and `tests/test_confidence_parser.py`.
-
-Examples of currently tested failure cases include:
-
-- truncated modules,
-- bad magic values,
-- sections extending beyond file boundaries,
-- malformed LEB128 encodings,
-- truncated instruction immediates.
-
-## Test fixtures and what they cover
-
-The repository uses `.wat` fixtures under `tests/fixtures/`, compiled to `.wasm` with WABT's `wat2wasm`.
-
-Representative fixtures include:
-
-- `simple_add.wat` for minimal arithmetic and local access,
-- `control_flow.wat` for `block`, `loop`, `br`, and `br_if`,
-- `labels_control.wat` for named-label lowering, `br_table` depth vectors, and label shadowing/redefinition patterns,
-- `memory_data.wat` for memory load semantics and data segments,
-- `globals_imports.wat` for imported globals and functions,
-- `call_indirect.wat` for indirect calls,
-- `call_refs.wat` for typed `call_ref` through locals and globals, plus null-ref call paths,
-- `load64.wat` for memory64 (`(memory i64 ...)`) addressing and large memarg offsets,
-- `float_memory64.wat` for memory64 float load/store decoding across `f32.*` and `f64.*` memory ops,
-- `bulk64.wat` for memory64 `memory.init`, `data.drop`, `memory.copy`, and `memory.fill`,
-- `memory_trap64.wat` for memory64 boundary-style address construction with `memory.size`, `memory.grow`, and scalar load/store ops,
-- `memory64_shared.wat` for shared memory64 limit decoding and `memory.size`/`memory.grow` disassembly,
-- `table_fill64.wat` for table64 `table.fill` and `table.get`,
-- `table_set64.wat` for table64 `table.set`/`table.get` on externref and funcref tables,
-- `table_size64.wat` for table64 `table.size`/`table.grow` plus i64 table limits,
-- `table_init64.wat` for table64 (`(table ... i64 ...)`) offsets plus `table.init`, `table.copy`, and table-indexed `call_indirect`,
-- `simd_store64_lane.wat` for SIMD lane memory operands, including `v128.store64_lane` alignment, offset, and lane immediates,
-- `unreachable.wat` for stack-polymorphic `unreachable` behavior across blocks, loops, calls, branches, memory, and numeric operators,
-- `bulk_memory.wat` for `memory.init`, `data.drop`, and `memory.fill`,
-- `complex_flow.wat` for mixed control flow, memory, direct calls, and indirect calls,
-- `unicode_names.wat` for Unicode content,
-- `adversarial_ops.wat` for edge immediates and `br_table`,
-- `wasi_capabilities.wat` for host capability/risk analysis checks,
-- `wasi_preview2_like.wat` for WASI preview2-like namespace detection (`wasi:*` imports),
-- `js_interface.wat` for JavaScript embedding detection (`js`, `wbg`, and `wasm:js-string` imports),
-- `dos_growth_loop.wat` for loop + `memory.grow` DoS heuristics.
-- `strings_secrets.wat` for string extraction and embedded secret/IoC detection,
-- `call_graph.wat` for direct/indirect call edges, import xrefs, and reachability.
-
-These fixtures are used in `tests/test_e2e.py` to validate the disassembly output and in `tests/test_json_api.py` to validate the structured API.
-
-## Known limitations
-
-The repository is a practical decoder, not a full specification implementation:
-
-- Spec validation (type checking, module-level structural constraints) is deliberately out of scope.
-- The custom `name` section decodes subsections 1 (function names) and 2 (local names); other subsections such as label names are skipped.
-- Component call-graph edges use per-core-module function index spaces; indices can collide across multiple core modules. Indirect and typed call edges are over-approximations by design.
-- Some rarely used init-expression forms in element and data segments fall back to a hex scan rather than full expression decoding.
-- The `analysis` layer is heuristic by design and is intended for triage, not formal proof of exploitability.
-
-## Development workflow
-
-Run the full test suite:
-
-```bash
-python -m pytest -q
-```
-
-Rebuild `.wasm` fixtures from `.wat` sources:
-
-```bash
-python tests/fixtures/build.py
-```
-
-The fixture build script requires WABT's `wat2wasm` binary to be available on `PATH`.
-
-If you prefer using Poetry, the repository metadata in `pyproject.toml` indicates Poetry-based packaging:
+## Development
 
 ```bash
 poetry install
 poetry run pytest -q
-poetry run python tests/fixtures/build.py
+poetry run python tests/fixtures/build.py   # requires WABT wat2wasm
 ```
 
-## Guidance for reviewers and integrators
-
-If you are evaluating this project for security tooling or pipeline integration, start with these files:
-
-- `wasm_tools/parser.py` for parse correctness,
-- `wasm_tools/opcodes.py` for current opcode coverage,
-- `wasm_tools/api.py` for the stable integration surface,
-- `tests/test_e2e.py` for output expectations,
-- `specification/wasm-latest/5.3-binary.instructions.spectec` for spec alignment work.
+The [development guide](./docs/DEVELOPMENT.md) covers the extension recipes (opcodes, sections, visitors, analysis rules) and the conventions that keep the error model and output contract stable.
 
 ## License
 

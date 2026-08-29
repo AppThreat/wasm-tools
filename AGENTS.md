@@ -8,11 +8,27 @@
 
 ## Documentation map
 
-- `README.md` — quick-start and CLI reference.
-- `ARCHITECTURE.md` — binary format, parser internals, and design decisions. Read this before touching `parser.py` or `visitor.py`.
-- `ANALYST_GUIDE.md` — practical field guide for security analysts: JSON field reference, triage recipes, worked examples. **Start here if you are triaging an unknown `.wasm` file.**
-- `AGENTS.md` — this file. Conventions for automated agents and contributors.
-- `SKILL.md` — high-level capability description.
+User-facing documentation lives in `docs/` and is published to GitHub Pages with docsify (deployed by `.github/workflows/docs.yml`; no build step, markdown is served as-is). New pages must be registered in `docs/_sidebar.md`.
+
+- `README.md`: quick start and pointer to the docs site.
+- `docs/README.md`: site home page.
+- `docs/GETTING_STARTED.md`: installation and first commands.
+- `docs/CLI.md`: full CLI flag and output reference.
+- `docs/FORMAT_PRIMER.md`: WebAssembly binary format walkthrough.
+- `docs/COMPONENT_MODEL.md`: component binary support and report shape.
+- `docs/JSON_REFERENCE.md`: the machine-readable report contract.
+- `docs/FINDINGS.md`: analysis rules, thresholds, capability tokens, finding ids.
+- `docs/ANALYST_GUIDE.md`: triage recipes for unknown `.wasm` files. **Start here if you are triaging an unknown file.**
+- `docs/COVERAGE.md`: spec coverage matrix.
+- `docs/LESSON1.md` ... `docs/LESSON10.md`: tutorials; every command is reproducible against `tests/fixtures/`.
+- `docs/ARCHITECTURE.md`: binary format, parser internals, and design decisions. Read this before touching `parser.py` or `visitor.py`.
+- `docs/DEVELOPMENT.md`: dev workflow and extension recipes.
+- `docs/MIGRATION.md`: 1.x to 2.0.0 schema and callback changes.
+- `docs/DEPENDENCY_RESEARCH.md`: WASM dependency detection and PURL research notes.
+- `AGENTS.md`: this file. Conventions for automated agents and contributors.
+- `SKILL.md`: high-level capability description for AI agents.
+
+Docs conventions: technical and human tone, no em-dashes, no emoji, restrained bullet use, mermaid and ASCII diagrams welcome. Lesson files follow the `LESSON<N>.md` naming convention.
 
 ## Architecture (read these first)
 

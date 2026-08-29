@@ -1,0 +1,28 @@
+- [Home](/)
+- [Getting started](GETTING_STARTED.md)
+- [CLI reference](CLI.md)
+- **Understanding the format**
+- [WebAssembly format primer](FORMAT_PRIMER.md)
+- [Component Model](COMPONENT_MODEL.md)
+- **Reference**
+- [JSON report reference](JSON_REFERENCE.md)
+- [Findings and signals](FINDINGS.md)
+- [Spec coverage matrix](COVERAGE.md)
+- **Triage**
+- [Analyst guide](ANALYST_GUIDE.md)
+- **Tutorials**
+- [Lesson 1: First contact with an unknown module](LESSON1.md)
+- [Lesson 2: Reading the JSON report end to end](LESSON2.md)
+- [Lesson 3: WASI triage](LESSON3.md)
+- [Lesson 4: JS-facing modules and boundary risk](LESSON4.md)
+- [Lesson 5: Strings, secrets, and IoCs](LESSON5.md)
+- [Lesson 6: The static call graph](LESSON6.md)
+- [Lesson 7: Resource exhaustion patterns](LESSON7.md)
+- [Lesson 8: Component Model binaries](LESSON8.md)
+- [Lesson 9: Scripting with the Python API](LESSON9.md)
+- [Lesson 10: Automated triage in CI](LESSON10.md)
+- **Internals**
+- [Architecture](ARCHITECTURE.md)
+- [Development guide](DEVELOPMENT.md)
+- [Migrating to 2.0.0](MIGRATION.md)
+- [Dependency research notes](DEPENDENCY_RESEARCH.md)
