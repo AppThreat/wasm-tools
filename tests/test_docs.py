@@ -25,8 +25,10 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 _DOCS_DIR = _REPO_ROOT / "docs"
 
 _BASH_BLOCK_RE = re.compile(r"```bash\n(.*?)\n?```", re.DOTALL)
-# Tools that documented blocks may invoke but a minimal env may lack.
-_OPTIONAL_TOOLS = ("jq", "xxd", "wat2wasm")
+# Tools that documented blocks may invoke but a minimal env may lack. CI
+# installs with pip, so poetry is absent there; wat2wasm and jq/xxd depend on
+# the runner image.
+_OPTIONAL_TOOLS = ("jq", "xxd", "wat2wasm", "poetry")
 # Scripts that lessons instruct the reader to write themselves.
 _READER_CREATED_SCRIPT_RE = re.compile(r"\b[\w./-]+\.py\b")
 
@@ -48,6 +50,10 @@ def _skip_reason(code: str) -> str | None:
         # Skip only when the tool is actually invoked, not merely mentioned.
         if re.search(rf"(^|\s|/|;|&&|\|){tool}\s", code) and not shutil.which(tool):
             return f"{tool} not installed"
+    # The fixture build script shells out to wat2wasm internally, so the word
+    # regex above cannot see the dependency.
+    if "tests/fixtures/build.py" in code and not shutil.which("wat2wasm"):
+        return "wat2wasm not installed (fixture rebuild)"
     for match in _READER_CREATED_SCRIPT_RE.finditer(code):
         script = match.group(0)
         if not Path(script).exists() and not (_REPO_ROOT / script).exists():
