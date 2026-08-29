@@ -8,7 +8,7 @@
 
 ## Documentation map
 
-User-facing documentation lives in `docs/` and is published to GitHub Pages with docsify (deployed by `.github/workflows/docs.yml`; no build step, markdown is served as-is). New pages must be registered in `docs/_sidebar.md`.
+User-facing documentation lives in `docs/` and is published to GitHub Pages with docsify. Pages serves the `main` branch with Jekyll disabled via the root `.nojekyll`; the root `index.html` redirects into `docs/`, where the docsify shell (`docs/index.html`) loads the markdown as-is (no build step). New pages must be registered in `docs/_sidebar.md`.
 
 - `README.md`: quick start and pointer to the docs site.
 - `docs/README.md`: site home page.
