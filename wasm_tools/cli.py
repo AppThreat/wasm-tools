@@ -24,11 +24,21 @@ def _print_strings_from_report(report: dict) -> None:
     """
     print("\nStrings:\n")
     for entry in report.get("strings", []):
-        mem = entry.get("memory_offset")
-        mem_str = f"0x{mem:08x}" if isinstance(mem, int) else "-"
         core_mod = entry.get("core_module")
         core_str = f" core[{core_mod}]" if isinstance(core_mod, int) else ""
         value = str(entry.get("value", ""))
+        source = entry.get("source")
+        if source:
+            # Custom-section strings (e.g. .debug_str) have no linear-memory
+            # provenance; the section label is the provenance.
+            print(
+                f" {source}{core_str} "
+                f"+0x{int(entry.get('byte_offset', 0)):x} "
+                f"len={entry.get('length')} {entry.get('encoding')} \"{value}\""
+            )
+            continue
+        mem = entry.get("memory_offset")
+        mem_str = f"0x{mem:08x}" if isinstance(mem, int) else "-"
         print(
             f" segment[{entry.get('segment_index')}]{core_str} "
             f"mem[{mem_str}] +0x{int(entry.get('byte_offset', 0)):x} "

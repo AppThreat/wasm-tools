@@ -43,7 +43,7 @@ wasm-tools tests/fixtures/dos_growth_loop.wasm --json --analysis-only | jq '{sum
 }
 ```
 
-The rule behind it: `WASM-DOS-003` fires when `memory.grow` operations exist and memory operations occur inside loops. Either alone is unremarkable; together they describe unbounded growth driven by iteration. The evidence names the offending function, so you know exactly where to look:
+The rule behind it: `WASM-DOS-003` fires when a `memory.grow` executes inside a loop body. A one-time startup growth is unremarkable even when other code touches memory in loops (nearly every compiled program does); what matters is growth driven by iteration. The evidence names the offending function, so you know exactly where to look:
 
 ```bash
 wasm-tools tests/fixtures/dos_growth_loop.wasm -d

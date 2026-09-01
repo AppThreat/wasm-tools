@@ -21,6 +21,10 @@ from typing import Any, Iterable, List, Optional, Sequence, Tuple
 # data segment cannot balloon report size unboundedly.
 DEFAULT_MAX_STRINGS = 1000
 
+# Separate, smaller budget for custom-section strings (.debug_str) so a large
+# DWARF payload cannot crowd out data-segment strings in the report.
+DEFAULT_MAX_CUSTOM_STRINGS = 250
+
 # Bytes treated as "printable" for ASCII run extraction. High-bit bytes are
 # excluded to keep provenance simple; UTF-16LE is detected separately.
 _PRINTABLE = set(range(0x20, 0x7F)) | {0x09}
@@ -152,6 +156,43 @@ def extract_strings(
         hits = hits[:max_entries]
         truncated = True
     return [h.to_dict() for h in hits], truncated
+
+
+def extract_custom_strings(
+    sources: Sequence[Tuple[str, bytes]],
+    min_len: int = 5,
+    max_entries: int = DEFAULT_MAX_CUSTOM_STRINGS,
+) -> Tuple[List[dict[str, Any]], bool]:
+    """Extract printable strings from custom-section payloads.
+
+    ``sources`` is a sequence of ``(source_label, payload)`` tuples, for
+    example ``("custom:.debug_str", payload)``.  Entries carry the label in a
+    ``source`` field and ``None`` for segment/memory provenance, because
+    custom sections live outside the linear-memory data-segment model.
+    Returns ``(entries, truncated)``.
+    """
+    entries: List[dict[str, Any]] = []
+    for source_label, payload in sources:
+        for start, length in _scan_ascii_runs(payload):
+            if length < min_len:
+                continue
+            entries.append(
+                {
+                    "source": source_label,
+                    "segment_index": None,
+                    "byte_offset": start,
+                    "memory_offset": None,
+                    "length": length,
+                    "encoding": "utf-8",
+                    "value": payload[start : start + length].decode("ascii"),
+                }
+            )
+    entries.sort(key=lambda e: (str(e["source"]), e["byte_offset"]))
+    truncated = False
+    if max_entries is not None and len(entries) > max_entries:
+        entries = entries[:max_entries]
+        truncated = True
+    return entries, truncated
 
 
 def _shannon_entropy(text: str) -> float:

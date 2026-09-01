@@ -38,7 +38,7 @@ Check `errors` before drawing conclusions. A truncated module yields partial dat
 
 ### `types`
 
-Function signatures: `{"index": 0, "params": ["i32", "i32"], "results": ["i32"]}`. GC subtype and rec-type wrappers are decoded into plain param and result vectors.
+Type-section entries: `{"index": 0, "kind": "func", "params": ["i32", "i32"], "results": ["i32"]}`. `kind` is `func`, `struct`, or `array`; composite kinds share the type index space with function signatures (every rec-group member occupies its own index) but carry no params or results. GC subtype and rec-type wrappers are decoded into plain param and result vectors.
 
 ### `imports`
 
@@ -99,7 +99,7 @@ Printable strings extracted from data segments, both `utf-8` and `utf-16le`:
 }
 ```
 
-`memory_offset` maps the string into linear memory and is null for passive segments. The list is capped at 1000 entries with `strings_truncated` set when the cap applies. Extraction is controlled by `strings_min_len` (default 5, CLI flag `--strings-min-len`) and can be disabled with `include_strings=False` in the library or `--no-strings` on the CLI. The `analysis.detections.strings` block screens these values for secrets and indicators; see [findings and signals](FINDINGS.md).
+`memory_offset` maps the string into linear memory and is null for passive segments. Unstripped DWARF builds also contribute `.debug_str` content: those entries carry a `source` field (`"custom:.debug_str"`) with null segment and memory provenance, use a separate 250-entry budget so they never crowd out data-segment strings, and do not feed the screening signals. Data-segment entries are capped at 1000 entries with `strings_truncated` set when either cap applies. Extraction is controlled by `strings_min_len` (default 5, CLI flag `--strings-min-len`) and can be disabled with `include_strings=False` in the library or `--no-strings` on the CLI. The `analysis.detections.strings` block screens data-segment values for secrets and indicators; see [findings and signals](FINDINGS.md).
 
 ## `call_graph`
 
@@ -179,13 +179,13 @@ The triage layer. Full field and rule documentation lives in two places: [findin
     "unknown_opcodes": []
   },
   "detections": { "wasi": {}, "js_interface": {}, "strings": {}, "format": {} },
-  "capabilities": ["host.logging", "js.host"],
+  "capabilities": ["host.logging", "js.host", "isa.simd"],
   "profiles": { "memory": {}, "control_flow": {}, "compute": {} },
   "findings": []
 }
 ```
 
-Risk tiers map from the 0 to 100 score: 0 is `none`, 1 to 39 `low`, 40 to 69 `medium`, 70 and above `high`. The score is a weighted triage aid, not a verdict; a self-contained crypto-attack module with no imports scores 0.
+Risk tiers map from the 0 to 100 score: 0 is `none`, 1 to 39 `low`, 40 to 69 `medium`, 70 and above `high`. The score is a weighted triage aid, not a verdict; a self-contained crypto-attack module with no imports scores 0. Capability tokens mix two namespaces: host-surface tokens (`fs.*`, `network`, `host.*`, `js.host`) from imports and instruction-set tokens (`isa.*`) from decoded opcodes; the latter carry no risk weight and answer engine portability instead.
 
 ## Stability notes
 

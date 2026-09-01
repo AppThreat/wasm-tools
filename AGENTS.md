@@ -23,7 +23,7 @@ User-facing documentation lives in `docs/` and is published to GitHub Pages with
 - `docs/LESSON1.md` ... `docs/LESSON10.md`: tutorials; every command is reproducible against `tests/fixtures/`.
 - `docs/ARCHITECTURE.md`: binary format, parser internals, and design decisions. Read this before touching `parser.py` or `visitor.py`.
 - `docs/DEVELOPMENT.md`: dev workflow and extension recipes.
-- `docs/MIGRATION.md`: 1.x to 2.0.0 schema and callback changes.
+- `docs/MIGRATION.md`: 1.x to 2.0.0 schema and callback changes, plus the 2.1.0 additive changes and the values they move.
 - `docs/DEPENDENCY_RESEARCH.md`: WASM dependency detection and PURL research notes.
 - `AGENTS.md`: this file. Conventions for automated agents and contributors.
 - `SKILL.md`: high-level capability description for AI agents.
@@ -58,7 +58,7 @@ Docs conventions: technical and human tone, no em-dashes, no emoji, restrained b
   poetry install
   poetry run pytest -q
   ```
-- Rebuild fixture `.wasm` files from `.wat` (requires WABT `wat2wasm`):
+- Rebuild fixture `.wasm` files from `.wat` (requires WABT `wat2wasm`; the final-spec GC fixtures additionally require the Rust `wasm-tools`, `brew install wasm-tools`):
   ```bash
   cd /Users/prabhu/work/AppThreat/wasm-tools
   poetry run python tests/fixtures/build.py
@@ -77,10 +77,11 @@ Docs conventions: technical and human tone, no em-dashes, no emoji, restrained b
 - When adding opcodes/immediates, update both `ImmType`/`OPCODES` and parser dispatch branches in `read_instructions()`.
 - Offsets printed in disassembly depend on `get_print_offset()` and `section_offsets`; avoid changing default offset semantics unless tests are updated.
 - Keep `analysis` schema backward compatible within a major version (`summary`, `detections`, `capabilities`, `profiles`, `findings`) and add new detection keys with tests. Current detection keys include `wasi`, `js_interface`, `strings`, and `format`. Breaking schema changes require a major version bump plus a `MIGRATION.md` entry (see 2.0.0).
-- Parser delegate signatures: `on_table`/`on_memory` accept `shared` and `page_size_log2` keyword args; `on_data` accepts `offset_value`; `on_import` passes `limits_shared`/`limits_page_size_log2` for table/memory imports; `read_limits()` returns a 5-tuple; `read_init_expr()` returns `(text, value)`.
+- Parser delegate signatures: `on_table`/`on_memory` accept `shared` and `page_size_log2` keyword args; `on_data` accepts `offset_value`; `on_import` passes `limits_shared`/`limits_page_size_log2` for table/memory imports; `read_limits()` returns a 5-tuple; `read_init_expr()` returns `(text, value)`; `on_type_kind(index, kind)` precedes `on_type` for every type-section entry; `on_debug_section(name, payload)` receives a zero-copy `memoryview`, so delegates that retain a payload must copy it.
+- Peek before consuming with `BinaryReader.peek_u8()`, never `self.data[self.offset]`: the bounds check turns truncation into `WasmParseError`, which section decoders report through `on_error`. A raw `IndexError` is swallowed by the per-section `except Exception` handler and produces a silently empty section.
 
 ## Integration points and dependencies
 
 - No runtime third-party Python deps are required for the library itself (`dependencies = []` in `pyproject.toml`).
 - Dev/test deps are `pytest` + `pytest-cov`; pytest options are configured in `pyproject.toml`.
-- External binary dependency only for fixture generation: WABT `wat2wasm` (`tests/fixtures/build.py`).
+- External binary dependencies only for fixture generation (`tests/fixtures/build.py`): WABT `wat2wasm` for most fixtures, plus the Rust `wasm-tools` for the final-spec GC fixtures (`gc_rec_group.wat`, `gc_ops.wat`); WABT's text front-end cannot parse rec groups, GC instruction keywords, or abstract heap types such as `anyref`, even with `--enable-gc`.

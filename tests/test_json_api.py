@@ -506,3 +506,178 @@ def test_parse_wasm_file_captures_simd_store64_lane_immediates():
         for fn in report["functions"]
         for ins in fn["instructions"]
     )
+
+
+# ─── DOS-003 tightening: growth must sit inside a loop body ─────────────────
+
+
+def test_growth_outside_loop_with_loop_memory_ops_does_not_fire():
+    # memory_grow_linear.wasm: one startup memory.grow plus memory traffic
+    # inside a loop. The old rule (any grow + any loop memory op) fired here.
+    report = parse_wasm_file(_fixture_path("memory_grow_linear.wasm"))
+
+    finding_ids = {f["id"] for f in report["analysis"]["findings"]}
+    assert "WASM-DOS-003" not in finding_ids
+    # the loop memory traffic is still profiled
+    assert report["analysis"]["profiles"]["compute"]["loop_memory_ops"] >= 1
+    assert report["analysis"]["profiles"]["memory"]["memory_grow_ops"] >= 1
+
+
+def test_loop_growth_finding_reports_grow_site_evidence():
+    report = parse_wasm_file(_fixture_path("dos_growth_loop.wasm"))
+
+    dos = next(f for f in report["analysis"]["findings"] if f["id"] == "WASM-DOS-003")
+    assert dos["evidence"]["loop_memory_grow_ops"] >= 1
+    assert dos["evidence"]["memory_grow_ops"] >= 1
+    # functions list names grow-in-loop sites only, capped for large modules
+    assert len(dos["evidence"]["functions"]) <= 50
+    assert dos["evidence"]["functions"]
+
+
+# ─── GC type kinds in the JSON report ───────────────────────────────────────
+
+
+def test_rec_group_fixture_reports_correct_type_indices_and_kinds():
+    report = parse_wasm_file(_fixture_path("gc_rec_group.wasm"))
+
+    types = {t["index"]: t for t in report["types"]}
+    assert sorted(types) == [0, 1, 2, 3]
+    assert types[0]["kind"] == "func"
+    assert types[1]["kind"] == "struct"
+    assert types[2]["kind"] == "struct"
+    assert types[3]["kind"] == "func"
+    assert types[3]["params"] == ["anyref"]
+    # the second function uses the post-rec-group func type at index 3
+    func1 = next(f for f in report["functions"] if f["index"] == 1)
+    assert func1["signature_index"] == 3
+
+
+def test_plain_module_types_default_to_func_kind():
+    report = parse_wasm_file(_fixture_path("simple_add.wasm"))
+
+    assert report["types"], "expected at least one type"
+    assert all(t["kind"] == "func" for t in report["types"])
+
+
+# ─── DWARF awareness ────────────────────────────────────────────────────────
+
+
+def _debug_module():
+    # A module with .debug_info and .debug_str custom sections appended.
+    def leb(n):
+        out = b""
+        while True:
+            b = n & 0x7F
+            n >>= 7
+            if n:
+                out += bytes([b | 0x80])
+            else:
+                out += bytes([b])
+                return out
+
+    def name(s):
+        raw = s.encode()
+        return leb(len(raw)) + raw
+
+    def custom(payload):
+        return bytes([0]) + leb(len(payload)) + payload
+
+    debug_info = custom(name(".debug_info") + b"\x00\x01\x02")
+    debug_str = custom(name(".debug_str") + b"src/main.c\x00libfoo\x00")
+    return b"\x00asm\x01\x00\x00\x00" + debug_info + debug_str
+
+
+def test_dwarf_sections_set_debug_info_present_signal():
+    from wasm_tools.api import parse_wasm_bytes
+
+    report = parse_wasm_bytes(_debug_module())
+    signals = report["analysis"]["detections"]["format"]["signals"]
+    assert "debug_info_present" in signals
+
+
+def test_debug_str_strings_extracted_with_custom_provenance():
+    from wasm_tools.api import parse_wasm_bytes
+
+    report = parse_wasm_bytes(_debug_module())
+    debug_hits = [s for s in report["strings"] if s.get("source") == "custom:.debug_str"]
+    values = {s["value"] for s in debug_hits}
+    assert "src/main.c" in values
+    assert "libfoo" in values
+    for hit in debug_hits:
+        assert hit["segment_index"] is None
+        assert hit["memory_offset"] is None
+
+
+def test_debug_str_strings_do_not_feed_secret_detection():
+    # A credential-looking value in .debug_str must not raise STR-007:
+    # the finding is documented for data segments.
+    from wasm_tools.api import parse_wasm_bytes
+
+    def leb(n):
+        out = b""
+        while True:
+            b = n & 0x7F
+            n >>= 7
+            if n:
+                out += bytes([b | 0x80])
+            else:
+                out += bytes([b])
+                return out
+
+    def name(s):
+        raw = s.encode()
+        return leb(len(raw)) + raw
+
+    payload = name(".debug_str") + b"https://evil.example.com\x00"
+    custom = bytes([0]) + leb(len(payload)) + payload
+    report = parse_wasm_bytes(b"\x00asm\x01\x00\x00\x00" + custom)
+    detection = report["analysis"]["detections"]["strings"]
+    assert "url" not in detection["signals"]
+    # but the value is still reported for the analyst
+    assert any(s["value"] == "https://evil.example.com" for s in report["strings"])
+
+
+# ─── isa.* tokens that do not come from opcodes ─────────────────────────────
+
+
+def test_gc_type_definitions_alone_yield_isa_gc():
+    # gc_rec_group.wasm defines struct types and an anyref parameter but never
+    # executes a GC instruction; an engine still needs GC support to load it.
+    report = parse_wasm_file(_fixture_path("gc_rec_group.wasm"))
+
+    assert "isa.gc" in report["analysis"]["capabilities"]
+
+
+def test_imported_64_bit_memory_yields_isa_memory64():
+    # Emscripten-style modules import their memory, so the memory section is
+    # empty and only the import carries the 64-bit index type.
+    def leb(n):
+        out = b""
+        while True:
+            b = n & 0x7F
+            n >>= 7
+            if n:
+                out += bytes([b | 0x80])
+            else:
+                return out + bytes([b])
+
+    def name(s):
+        raw = s.encode()
+        return leb(len(raw)) + raw
+
+    # import section: env.memory, memory type, flags 0x04 (is_64), min 1
+    payload = leb(1) + name("env") + name("memory") + b"\x02" + b"\x04" + leb(1)
+    module = b"\x00asm\x01\x00\x00\x00" + bytes([2]) + leb(len(payload)) + payload
+    report = parse_wasm_bytes(module)
+
+    assert report["imports"][0]["limits"]["is_64"] is True
+    assert "isa.memory64" in report["analysis"]["capabilities"]
+
+
+def test_memory_profile_exposes_loop_growth_counter():
+    report = parse_wasm_file(_fixture_path("dos_growth_loop.wasm"))
+    linear = parse_wasm_file(_fixture_path("memory_grow_linear.wasm"))
+
+    assert report["analysis"]["profiles"]["memory"]["loop_memory_grow_ops"] >= 1
+    assert linear["analysis"]["profiles"]["memory"]["loop_memory_grow_ops"] == 0
+    assert linear["analysis"]["profiles"]["memory"]["memory_grow_ops"] >= 1

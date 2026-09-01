@@ -208,3 +208,70 @@ includes the `component` block and aggregated sections.
    tuple arity.
 6. Consider opting into the new surfaces (`strings`, `call_graph`,
    `toolchain`) because they are additive and cheap to ignore.
+
+---
+
+## Changes in 2.1.0
+
+These landed on top of 2.0.0 and are backward compatible under the schema
+rule (`summary`, `detections`, `capabilities`, `profiles`, `findings` keep
+their shape), which is why 2.1.0 is a minor release. Two of them still change
+values you may be reading, which is why they are listed here rather than only
+in the [findings reference](FINDINGS.md).
+
+### Values that change for existing keys
+
+- **`types[]` index space now matches the module for GC rec groups.** Every
+  member of a `rec` group occupies its own type index, as the spec requires.
+  A rec group used to be collapsed into a single entry, so in modules with
+  rec groups (Kotlin/Wasm, dart2wasm) `types[]` was short and every later
+  index was shifted, including `functions[].signature_index` and
+  `call_indirect` type displays. Entries also gain **`kind`** (`func`,
+  `struct`, or `array`); composite kinds carry empty `params`/`results`.
+- **`WASM-DOS-003` evidence `functions` changed meaning.** The rule now
+  requires the `memory.grow` itself to execute inside a loop body, so
+  `functions` lists the grow-in-loop functions rather than every function
+  with memory traffic inside a loop. The list is capped at 50 with
+  `functions_truncated: true` when it applies, and evidence gains
+  `loop_memory_grow_ops`. Consumers keying off `functions` will see different
+  indices, and known-benign binaries that previously scored `high` from this
+  rule (bz2, spidermonkey, ffmpeg, pulldown-cmark) now score `medium`.
+- **Legacy exception-handling opcodes decode.** `try` (0x06), `catch` (0x07),
+  `rethrow` (0x09), `delegate` (0x18), and `catch_all` (0x19) used to render
+  as `unknown_00_xx` and desynchronize the rest of the function body, so
+  `summary.unknown_opcodes` shrinks and instruction streams change for
+  pre-renumbering binaries.
+
+### Additive keys
+
+- `analysis.capabilities` gains the **`isa.*` namespace** derived from decoded
+  instructions and module types (`isa.simd`, `isa.relaxed-simd`,
+  `isa.atomics`, `isa.gc`, `isa.function-references`, `isa.tail-call`,
+  `isa.memory64`, `isa.wide-arithmetic`, `isa.exceptions`,
+  `isa.legacy-exceptions`). These answer engine portability and carry no risk
+  weight. Filter on the `isa.` prefix if you treat capabilities as host
+  surface only.
+- Finding **`WASM-ISA-008`** (relaxed SIMD, severity low, weight 0) is a
+  compatibility advisory and does not move the risk score.
+- `analysis.profiles.memory` gains `loop_memory_grow_ops`.
+- `analysis.detections.format.signals` gains `debug_info_present` for
+  unstripped DWARF builds.
+- `strings[]` gains an optional **`source`** field. Entries from custom
+  sections (currently `"custom:.debug_str"`) set it, have `null`
+  `segment_index`/`memory_offset`, use a separate 250-entry budget, and are
+  excluded from secret/IoC screening, which stays data-segment only.
+
+### Library API
+
+- New optional delegate callbacks: `on_type_kind(index, kind)`, called before
+  `on_type` for every type-section entry, and
+  `on_debug_section(name, payload)` for `.debug_*` custom sections. The
+  payload is a zero-copy `memoryview`, so a delegate that retains it must
+  copy it.
+- New `BinaryReader.peek_u8()` reads the byte at the cursor without consuming
+  it and raises `WasmParseError` past the end of input. Use it instead of
+  indexing `self.data` directly: a raw `IndexError` is swallowed by the
+  per-section handler and yields a silently empty section.
+- Undecodable type sections now report through `on_error` (unknown composite
+  tags, truncated payloads, and nested `rec` groups) and skip to the section
+  end instead of decoding later entries from a desynchronized offset.

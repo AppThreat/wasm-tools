@@ -442,3 +442,113 @@ def test_api_report_memories():
     report = parse_wasm_file(os.path.join(FIXTURES_DIR, "bulk_memory.wasm"))
     assert report["memories"]
     assert report["memories"][0]["limits"]["min"] == 1
+
+
+# ─── toolchain custom section contents in -x output ─────────────────────────
+
+
+def _leb(n):
+    out = b""
+    while True:
+        b = n & 0x7F
+        n >>= 7
+        if n:
+            out += bytes([b | 0x80])
+        else:
+            out += bytes([b])
+            return out
+
+
+def _name(s):
+    raw = s.encode("utf-8")
+    return _leb(len(raw)) + raw
+
+
+def _custom(payload):
+    return bytes([0]) + _leb(len(payload)) + payload
+
+
+def _module_with_customs(*customs):
+    return b"\x00asm\x01\x00\x00\x00" + b"".join(customs)
+
+
+def _producers_custom():
+    payload = _name("producers") + _leb(2)
+    payload += _name("language") + _leb(1) + _name("C99") + _name("")
+    payload += _name("processed-by") + _leb(1) + _name("clang") + _name("14.0.4")
+    return _custom(payload)
+
+
+def _target_features_custom():
+    payload = _name("target_features") + _leb(2)
+    payload += b"\x2B" + _name("mutable-globals")
+    payload += b"\x2D" + _name("atomics")
+    return _custom(payload)
+
+
+def test_details_prints_producers_fields(capsys):
+    _run_details(_module_with_customs(_producers_custom()))
+    out = capsys.readouterr().out
+    assert 'Custom[0] "producers":' in out
+    assert ' - language: "C99" ""' in out
+    assert ' - processed-by: "clang" "14.0.4"' in out
+
+
+def test_details_prints_target_features(capsys):
+    _run_details(_module_with_customs(_target_features_custom()))
+    out = capsys.readouterr().out
+    assert 'Custom[0] "target_features":' in out
+    assert " - +mutable-globals" in out
+    assert " - -atomics" in out
+
+
+def test_details_prints_composite_type_kinds(capsys):
+    if not os.path.exists(os.path.join(FIXTURES_DIR, "gc_ops.wasm")):
+        pytest.skip("gc_ops.wasm not found (built with wasm-tools)")
+    _run_details(_fixture("gc_ops.wasm"))
+    out = capsys.readouterr().out
+    assert " - type[0]: struct" in out
+    assert " - type[2]: array" in out
+    # func types keep the signature form
+    assert " - type[3]: () -> ((ref type[0]))" in out
+
+
+# ─── custom section names in --headers output ───────────────────────────────
+
+
+def _run_headers(data: bytes) -> str:
+    import io
+    from contextlib import redirect_stdout
+    from wasm_tools.visitor import BinaryReaderObjdumpHeaders
+
+    options = ObjdumpOptions(mode=ObjdumpMode.PREPASS)
+    state = ObjdumpState()
+    BinaryReader(data, BinaryReaderObjdumpPrepass(data, options, state)).read_module()
+    options.mode = ObjdumpMode.HEADERS
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        BinaryReader(
+            data, BinaryReaderObjdumpHeaders(data, options, state)
+        ).read_module()
+    return buf.getvalue()
+
+
+def test_headers_shows_custom_section_names(capsys):
+    out = _run_headers(_module_with_customs(_producers_custom(), _target_features_custom()))
+    assert 'name: "producers"' in out
+    assert 'name: "target_features"' in out
+
+
+def test_headers_shows_dwarf_section_names(capsys):
+    debug_custom = _custom(_name(".debug_info") + b"\x00" * 4)
+    debug_str = _custom(_name(".debug_str") + b"src/main.c\x00libfoo\x00")
+    out = _run_headers(_module_with_customs(debug_custom, debug_str))
+    assert 'name: ".debug_info"' in out
+    assert 'name: ".debug_str"' in out
+
+
+def test_headers_name_section_fixture(capsys):
+    if not os.path.exists(os.path.join(FIXTURES_DIR, "gc_rec_group.wasm")):
+        pytest.skip("gc_rec_group.wasm not found (built with wasm-tools)")
+    out = _run_headers(_fixture("gc_rec_group.wasm"))
+    assert 'name: "name"' in out

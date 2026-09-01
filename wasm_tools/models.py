@@ -51,12 +51,19 @@ EXTERN_KIND_NAMES = {0: "func", 1: "table", 2: "memory", 3: "global", 4: "tag"}
 
 @dataclass
 class FuncType:
-    """Decoded function signature (type section entry)."""
+    """Decoded type-section entry.
+
+    ``kind`` distinguishes function signatures from GC composite types that
+    share the type index space (``struct``/``array`` carry no signature).
+    """
 
     params: List[str] = field(default_factory=list)
     results: List[str] = field(default_factory=list)
+    kind: str = "func"
 
     def __str__(self) -> str:
+        if self.kind != "func":
+            return self.kind
         p = ", ".join(self.params) if self.params else ""
         r = ", ".join(self.results) if self.results else ""
         return f"({p}) -> ({r})"
@@ -215,6 +222,10 @@ class ObjdumpState:
         self.function_types: Dict[int, int] = {}
         # Rich section data (populated by prepass)
         self.types: List[FuncType] = []
+        # Type kinds ("func"/"struct"/"array") by type index; missing = func.
+        self.type_kinds: Dict[int, str] = {}
+        # Raw .debug_str custom-section payload when present (DWARF strings).
+        self.debug_str_payload: Optional[bytes] = None
         self.imports: List[ImportEntry] = []
         self.exports: List[ExportEntry] = []
         self.globals: List[GlobalEntry] = []

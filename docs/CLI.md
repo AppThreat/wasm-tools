@@ -32,7 +32,7 @@ When `--json` and `--json-out` are combined, the payload is printed to stdout an
 
 ### `--headers`
 
-The fastest way to understand what a file contains. Each row shows the section id, its symbolic name, the payload size in bytes, and the offset of the section payload in the file. Section ids are listed in the [format primer](FORMAT_PRIMER.md).
+The fastest way to understand what a file contains. Each row shows the section id, its symbolic name, the payload size in bytes, and the offset of the section payload in the file. Custom sections append their quoted name after the offset, which makes DWARF (`.debug_info`, `.debug_str`) and toolchain (`producers`, `target_features`) sections identifiable at a glance. Section ids are listed in the [format primer](FORMAT_PRIMER.md).
 
 ### `-x`, `--details`
 
@@ -46,6 +46,8 @@ Import[2]:
 Function[1]:
  - func[1]: sig=1
 ```
+
+Custom toolchain sections print their contents in this mode: `producers` rows as ` - <field>: "<name>" "<version>"`, `target_features` rows as ` - +feature` or ` - -feature`. Type rows print ` - type[N]: (params) -> (results)` for function signatures and ` - type[N]: struct` or `array` for GC composite types.
 
 A missing import section means the module has no external dependencies. A missing export section means the host cannot call into it by name.
 
@@ -71,7 +73,7 @@ Prints one line per extracted string with its provenance:
  segment[0] mem[0x00000000] +0x0 len=32 utf-8 "https://evil.example.com/payload"
 ```
 
-Read the fields as follows: `segment[N]` is the data segment index, `mem[0x...]` is the absolute linear-memory offset the segment initializes (a dash for passive segments), `+0x...` is the offset within the segment, `len` is the decoded byte length, and the encoding is `utf-8` or `utf-16le`. Both encodings are extracted, so obfuscated UTF-16 strings in data segments still surface. Extraction happens before output filtering, which is why `--strings-min-len 3` can surface short strings that the default threshold of 5 hides. The list is capped at 1000 entries in JSON output with a `strings_truncated` flag.
+Read the fields as follows: `segment[N]` is the data segment index, `mem[0x...]` is the absolute linear-memory offset the segment initializes (a dash for passive segments), `+0x...` is the offset within the segment, `len` is the decoded byte length, and the encoding is `utf-8` or `utf-16le`. Both encodings are extracted, so obfuscated UTF-16 strings in data segments still surface. Unstripped binaries also contribute `.debug_str` content, printed as ` custom:.debug_str +0x... len=N utf-8 "..."` with section-relative offsets. Extraction happens before output filtering, which is why `--strings-min-len 3` can surface short strings that the default threshold of 5 hides. The list is capped at 1000 entries in JSON output with a `strings_truncated` flag.
 
 ### `--calls FUNC`
 

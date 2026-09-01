@@ -85,6 +85,17 @@ class BinaryReader:
         self.offset += 1
         return val
 
+    def peek_u8(self) -> int:
+        """Return the byte at the cursor without consuming it.
+
+        Bounds-checked on purpose: peeking past the end must raise
+        ``WasmParseError`` like every other reader, so section decoders report
+        truncation through ``on_error`` instead of leaking an ``IndexError``
+        into the generic per-section handler, which swallows it silently.
+        """
+        self._ensure(1)
+        return self.data[self.offset]
+
     def read_u32(self) -> int:
         self._ensure(4)
         val = struct.unpack_from("<I", self.data, self.offset)[0]
@@ -137,7 +148,7 @@ class BinaryReader:
 
     def read_heaptype(self) -> str:
         """Read a heaptype (abs byte or s33 type index)."""
-        byte = self.data[self.offset]
+        byte = self.peek_u8()
         if byte in _ABS_HEAP_TYPES:
             self.offset += 1
             return _ABS_HEAP_TYPES[byte]
@@ -151,7 +162,7 @@ class BinaryReader:
 
     def read_reftype(self) -> str:
         """Read a reference type (§5.2 Breftype)."""
-        byte = self.data[self.offset]
+        byte = self.peek_u8()
         if byte == 0x63:
             self.offset += 1
             ht = self.read_heaptype()
@@ -169,7 +180,7 @@ class BinaryReader:
 
     def read_valtype(self) -> str:
         """Read one value type byte and return its name."""
-        byte = self.data[self.offset]
+        byte = self.peek_u8()
         if byte in _VAL_TYPES:
             self.offset += 1
             name = _VAL_TYPES[byte]
@@ -395,49 +406,88 @@ class BinaryReader:
                         self.delegate.on_target_feature(enabled, feature_name)
             except WasmParseError:
                 pass  # malformed target_features section: abandon rest of payload
+        elif name.startswith(".debug_") and hasattr(self.delegate, "on_debug_section"):
+            # DWARF debug sections are stored verbatim; the name is enough for
+            # detection, and .debug_str payloads feed string extraction. The
+            # payload is handed over as a zero-copy memoryview because DWARF
+            # dominates unstripped builds (tens of MB in ffmpeg-class
+            # binaries); delegates that keep a payload must copy it themselves.
+            self.delegate.on_debug_section(
+                name, memoryview(self.data)[self.offset : end_offset]
+            )
 
-    def _read_functype(self) -> Tuple[List[str], List[str]]:
-        """Read one function type (0x60 prefix + param vec + result vec)."""
+    def _read_comptype(self) -> Tuple[str, List[str], List[str]]:
+        """Read one subtype/composite type; return (kind, params, results).
+
+        ``kind`` is ``func``, ``struct``, or ``array``; composite kinds carry
+        no signature, so params/results are empty for them.
+        """
         tag = self.read_u8()
         if tag == 0x60:
             param_count = self.read_leb128(max_bits=32)
             params = [self.read_valtype() for _ in range(param_count)]
             result_count = self.read_leb128(max_bits=32)
             results = [self.read_valtype() for _ in range(result_count)]
-            return params, results
-        # GC composite types: SUB / REC wrappers - skip to find 0x60
-        # For now, skip sub-type header and recurse
-        if tag in (0x4E, 0x4F, 0x50):  # rec, sub final, sub open
-            if tag == 0x4E:  # rec: list of subtypes
-                count = self.read_leb128(max_bits=32)
-                params, results = [], []
-                for _ in range(count):
-                    params, results = self._read_functype()
-                return params, results
-            # sub: supertype list + comptype
-            count = self.read_leb128(max_bits=32)
-            for _ in range(count):
+            return "func", params, results
+        if tag in (0x4F, 0x50):  # sub (final), sub (open)
+            supertype_count = self.read_leb128(max_bits=32)
+            for _ in range(supertype_count):
                 self.read_leb128(max_bits=32)  # typeidx
-            return self._read_functype()
-        # comptype array/struct: skip
+            return self._read_comptype()
         if tag == 0x5E:  # array
             self.read_valtype()
             self.read_u8()  # mut
-            return [], []
+            return "array", [], []
         if tag == 0x5F:  # struct
-            count = self.read_leb128(max_bits=32)
-            for _ in range(count):
+            field_count = self.read_leb128(max_bits=32)
+            for _ in range(field_count):
                 self.read_valtype()
                 self.read_u8()
-            return [], []
-        return [], []
+            return "struct", [], []
+        raise WasmParseError(f"unknown type definition tag {tag:#x}")
+
+    def _read_rectype(
+        self, end_offset: Optional[int] = None
+    ) -> List[Tuple[str, List[str], List[str]]]:
+        """Read one type-section entry, flattening GC rec groups.
+
+        Every member of a rec group occupies its own slot in the module's
+        type index space, so a rec entry expands to one result per member.
+        Rec groups do not nest (their members are subtypes), so members are
+        read as plain composite types; that also bounds recursion depth.
+        """
+        limit = self.size if end_offset is None else min(end_offset, self.size)
+        if self.offset >= limit:
+            raise WasmParseError("ended before the next type entry")
+        if self.peek_u8() == 0x4E:  # rec
+            self.read_u8()
+            count = self.read_leb128(max_bits=32)
+            entries: List[Tuple[str, List[str], List[str]]] = []
+            for _ in range(count):
+                if self.offset >= limit:
+                    raise WasmParseError("rec group ended before its last member")
+                entries.append(self._read_comptype())
+            return entries
+        return [self._read_comptype()]
 
     def _decode_type(self, end_offset: int) -> None:
         count = self.read_leb128(max_bits=32)
-        for i in range(count):
-            params, results = self._read_functype()
-            if hasattr(self.delegate, "on_type"):
-                self.delegate.on_type(i, params, results)
+        index = 0
+        try:
+            for _ in range(count):
+                for kind, params, results in self._read_rectype(end_offset):
+                    if hasattr(self.delegate, "on_type_kind"):
+                        self.delegate.on_type_kind(index, kind)
+                    if hasattr(self.delegate, "on_type"):
+                        self.delegate.on_type(index, params, results)
+                    index += 1
+        except WasmParseError as exc:
+            # An unknown composite form or truncated payload makes the rest
+            # of the section undecodable; report and skip to the section end
+            # instead of desynchronizing every later type index.
+            if hasattr(self.delegate, "on_error"):
+                self.delegate.on_error(f"type section: {exc}")
+            self.offset = end_offset
 
     def _decode_import(self, end_offset: int) -> None:
         count = self.read_leb128(max_bits=32)
@@ -507,7 +557,7 @@ class BinaryReader:
         count = self.read_leb128(max_bits=32)
         for i in range(count):
             # MVP: just reftype + limits; MVP2 allows 0x40 0x00 prefix + init
-            byte = self.data[self.offset]
+            byte = self.peek_u8()
             if byte == 0x40:
                 self.read_u8()  # 0x40
                 self.read_u8()  # 0x00
@@ -896,3 +946,13 @@ class BinaryReader:
                 self.read_u8()  # reserved byte 0x00
                 if hasattr(self.delegate, "on_opcode_bare"):
                     self.delegate.on_opcode_bare()
+
+            elif imm_type == ImmType.DELEGATE_LABEL:
+                # Legacy `delegate` terminates its try block like `end` does,
+                # but carries a label index for the enclosing handler depth.
+                idx = self.read_leb128(max_bits=32)
+                if hasattr(self.delegate, "on_opcode_index"):
+                    self.delegate.on_opcode_index(idx)
+                depth -= 1
+                if depth == 0:
+                    break

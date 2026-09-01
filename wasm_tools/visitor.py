@@ -79,8 +79,15 @@ class BinaryReaderObjdumpPrepass(BinaryReaderObjdumpBase):
     def on_local_name(self, func_idx: int, local_idx: int, name: str) -> None:
         self.objdump_state.local_names[(func_idx, local_idx)] = name
 
+    def on_type_kind(self, index: int, kind: str) -> None:
+        self.objdump_state.type_kinds[index] = kind
+
     def on_type(self, index: int, params: List[str], results: List[str]) -> None:
-        ft = FuncType(params=params, results=results)
+        ft = FuncType(
+            params=params,
+            results=results,
+            kind=self.objdump_state.type_kinds.get(index, "func"),
+        )
         # ensure list is big enough
         while len(self.objdump_state.types) <= index:
             self.objdump_state.types.append(FuncType())
@@ -254,6 +261,13 @@ class BinaryReaderObjdumpPrepass(BinaryReaderObjdumpBase):
     def on_target_feature(self, enabled: bool, name: str) -> None:
         self.objdump_state.target_features.append((enabled, name))
 
+    def on_debug_section(self, name: str, payload: memoryview) -> None:
+        # Only .debug_str carries analyst-useful strings; other DWARF
+        # sections are detected by name alone. The parser hands over a
+        # zero-copy view, so copy the one payload we keep.
+        if name == ".debug_str":
+            self.objdump_state.debug_str_payload = bytes(payload)
+
 
 class BinaryReaderObjdumpHeaders(BinaryReaderObjdumpBase):
     """Emit a section-header table (wasm-objdump -h style)."""
@@ -272,8 +286,15 @@ class BinaryReaderObjdumpHeaders(BinaryReaderObjdumpBase):
     def begin_section(self, section_index: int, section_code: int, size: int) -> None:
         super().begin_section(section_index, section_code, size)
         name = SECTION_NAMES.get(section_code, "Unknown")
+        # Custom section names come from the prepass state; wasm-objdump
+        # appends the quoted name so DWARF/toolchain sections are identifiable.
+        suffix = ""
+        if section_code == BinarySection.CUSTOM:
+            custom_name = self.objdump_state.section_names.get(section_index)
+            if custom_name:
+                suffix = f' name: "{custom_name}"'
         off = self.offset
-        print(f"  {section_code:3d} {name:<16} {size:6d}  {off:08x}")
+        print(f"  {section_code:3d} {name:<16} {size:6d}  {off:08x}{suffix}")
         self._section_count += 1
 
 
@@ -323,9 +344,23 @@ class BinaryReaderObjdumpDetails(BinaryReaderObjdumpBase):
     # ── type section ──────────────────────────────────────────────────────
 
     def on_type(self, index: int, params: List[str], results: List[str]) -> None:
+        kind = self.objdump_state.type_kinds.get(index, "func")
+        if kind != "func":
+            print(f" - type[{index}]: {kind}")
+            return
         p = ", ".join(params) if params else ""
         r = ", ".join(results) if results else ""
         print(f" - type[{index}]: ({p}) -> ({r})")
+
+    # ── toolchain custom sections ─────────────────────────────────────────
+
+    def on_producers_field(self, field: str, entries: List[tuple]) -> None:
+        for prod_name, prod_version in entries:
+            print(f' - {field}: "{prod_name}" "{prod_version}"')
+
+    def on_target_feature(self, enabled: bool, name: str) -> None:
+        sign = "+" if enabled else "-"
+        print(f" - {sign}{name}")
 
     # ── import section ────────────────────────────────────────────────────
 

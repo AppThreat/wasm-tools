@@ -329,3 +329,103 @@ def test_threads_basic_fixture_disassembly(capsys):
     data = _fixture("threads_basic.wasm")
     out = _disassemble(data)
     assert "atomic" in out
+
+
+# ─── Legacy exception handling (pre-renumbering binaries) ───────────────────
+
+
+def test_legacy_eh_opcodes_in_table():
+    expected = {
+        0x06: ("try", ImmType.BLOCK_SIG),
+        0x07: ("catch", ImmType.INDEX),
+        0x09: ("rethrow", ImmType.INDEX),
+        0x18: ("delegate", ImmType.DELEGATE_LABEL),
+        0x19: ("catch_all", ImmType.NONE),
+    }
+    for code, (name, imm) in expected.items():
+        assert OPCODES[(0, code)] == (name, imm), f"missing legacy EH {name}"
+
+
+def test_legacy_try_catch_catch_all_decodes(capsys):
+    # try (blocktype 0x40) / i32.const / catch 0 / catch_all / end
+    body = bytes([0x00, 0x06, 0x40, 0x41, 0x07, 0x07, 0x00, 0x1A, 0x19, 0x1A, 0x0B])
+    out = _disassemble(_make_module(body))
+    assert "try" in out
+    assert "catch 0" in out
+    assert "catch_all" in out
+    assert "unknown_00_06" not in out
+    assert "unknown_00_07" not in out
+
+
+def test_legacy_delegate_closes_try_block_and_resyncs(capsys):
+    # try / i32.const 7 / delegate 0 closes the try; the trailing end is the
+    # function end. Before the fix, delegate decoded as unknown and the
+    # remainder of the body misrendered.
+    body = bytes([0x00, 0x06, 0x40, 0x41, 0x07, 0x18, 0x00, 0x0B])
+    out = _disassemble(_make_module(body))
+    assert "delegate 0" in out
+    assert "unknown_00_18" not in out
+    lines = [ln.strip() for ln in out.splitlines() if "| delegate" in ln or ln.endswith("| end")]
+    assert lines[-1].endswith("| end")  # body still terminates on a real end
+
+
+def test_legacy_rethrow_decodes_label(capsys):
+    body = bytes([0x00, 0x02, 0x40, 0x06, 0x40, 0x09, 0x00, 0x0B, 0x0B])
+    out = _disassemble(_make_module(body))
+    assert "rethrow 0" in out
+
+
+def test_legacy_eh_yields_isa_capability():
+    from wasm_tools.api import parse_wasm_bytes
+
+    body = bytes([0x00, 0x06, 0x40, 0x41, 0x07, 0x07, 0x00, 0x1A, 0x0B])
+    report = parse_wasm_bytes(_make_module(body))
+    assert "isa.legacy-exceptions" in report["analysis"]["capabilities"]
+    assert report["errors"] == []
+
+
+# ─── Opcode-derived isa.* capabilities ──────────────────────────────────────
+
+
+def test_isa_capabilities_from_fixtures():
+    from wasm_tools.api import parse_wasm_bytes
+
+    cases = {
+        "simd_basic.wasm": "isa.simd",
+        "simd_store64_lane.wasm": "isa.simd",
+        "gc_ops.wasm": "isa.gc",
+        "call_refs.wasm": "isa.function-references",
+        "exceptions_basic.wasm": "isa.exceptions",
+        "threads_basic.wasm": "isa.atomics",
+        "memory64_shared.wasm": "isa.memory64",
+        "bulk64.wasm": "isa.memory64",
+    }
+    for fixture, token in cases.items():
+        report = parse_wasm_bytes(_fixture(fixture))
+        assert token in report["analysis"]["capabilities"], f"{token} missing for {fixture}"
+        assert report["analysis"]["summary"]["unknown_opcode_count"] == 0
+
+
+def test_relaxed_simd_capability_and_advisory_finding():
+    from wasm_tools.api import parse_wasm_bytes
+
+    # 0xFD 0x100 (256) = i8x16.relaxed_swizzle, then drop; 0xFD 269 = f32x4.relaxed_min
+    body = bytes([0x00]) + b"\xFD\x80\x02" + bytes([0x1A]) + b"\xFD\x85\x02" + bytes([0x1A, 0x0B])
+    report = parse_wasm_bytes(_make_module(body))
+    caps = report["analysis"]["capabilities"]
+    assert "isa.simd" in caps
+    assert "isa.relaxed-simd" in caps
+    findings = report["analysis"]["findings"]
+    relaxed = [f for f in findings if f["id"] == "WASM-ISA-008"]
+    assert relaxed, "expected WASM-ISA-008 advisory for relaxed SIMD"
+    assert relaxed[0]["severity"] == "low"
+    assert relaxed[0]["evidence"]["relaxed_opcode_count"] == 2
+
+
+def test_no_isa_capabilities_for_plain_module():
+    from wasm_tools.api import parse_wasm_bytes
+
+    body = bytes([0x00, 0x41, 0x2A, 0x1A, 0x0B])  # i32.const 42; drop; end
+    report = parse_wasm_bytes(_make_module(body))
+    assert [c for c in report["analysis"]["capabilities"] if c.startswith("isa.")] == []
+    assert report["analysis"]["findings"] == []

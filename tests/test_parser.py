@@ -183,3 +183,167 @@ def test_read_limits_shared64_custom_page_size_flag0f():
     reader = BinaryReader(b"\x0f\x01\x03\x10", DummyDelegate())
     mn, mx, is64, shared, ps_log2 = reader.read_limits()
     assert (mn, mx, is64, shared, ps_log2) == (1, 3, True, True, 16)
+
+
+# ─── GC rec groups and composite type kinds ─────────────────────────────────
+
+
+class _TypeCaptureDelegate(DummyDelegate):
+    """Capture on_type / on_type_kind emissions in order."""
+
+    def __init__(self):
+        super().__init__()
+        self.types = []
+        self.kinds = {}
+
+    def on_type(self, index, params, results):
+        self.types.append((index, params, results))
+
+    def on_type_kind(self, index, kind):
+        self.kinds[index] = kind
+
+
+def _leb(n):
+    out = b""
+    while True:
+        b = n & 0x7F
+        n >>= 7
+        if n:
+            out += bytes([b | 0x80])
+        else:
+            out += bytes([b])
+            return out
+
+
+def _section(sid, payload):
+    return bytes([sid]) + _leb(len(payload)) + payload
+
+
+def test_rec_group_members_get_their_own_type_indices():
+    # One outer entry: rec { struct{i32}, struct{i64} } => indices 0 and 1.
+    payload = _leb(1) + b"\x4E\x02" + b"\x5F\x01\x7F\x00" + b"\x5F\x01\x7E\x00"
+    reader = BinaryReader(b"\x00asm\x01\x00\x00\x00" + _section(1, payload),
+                          _TypeCaptureDelegate())
+    reader.read_module()
+    delegate = reader.delegate
+    assert [t[0] for t in delegate.types] == [0, 1]
+    assert delegate.kinds == {0: "struct", 1: "struct"}
+
+
+def test_types_after_rec_group_keep_correct_indices():
+    # struct, rec { struct, struct }, func => four type indices, func at 3.
+    t0 = b"\x5F\x01\x7F\x00"
+    rec = b"\x4E\x02" + b"\x5F\x01\x7F\x00" + b"\x5F\x01\x7E\x00"
+    t3 = b"\x60\x01\x7F\x01\x7F"
+    payload = _leb(3) + t0 + rec + t3
+    reader = BinaryReader(b"\x00asm\x01\x00\x00\x00" + _section(1, payload),
+                          _TypeCaptureDelegate())
+    reader.read_module()
+    delegate = reader.delegate
+    assert [t[0] for t in delegate.types] == [0, 1, 2, 3]
+    assert delegate.types[3] == (3, ["i32"], ["i32"])
+    assert delegate.kinds == {0: "struct", 1: "struct", 2: "struct", 3: "func"}
+
+
+def test_sub_wrapped_func_type_decodes():
+    # sub (open) with one supertype wrapping (func (i32) -> (i32)).
+    payload = _leb(1) + b"\x50\x01\x00" + b"\x60\x01\x7F\x01\x7F"
+    reader = BinaryReader(b"\x00asm\x01\x00\x00\x00" + _section(1, payload),
+                          _TypeCaptureDelegate())
+    reader.read_module()
+    delegate = reader.delegate
+    assert delegate.types == [(0, ["i32"], ["i32"])]
+    assert delegate.kinds == {0: "func"}
+
+
+def test_array_type_reports_array_kind():
+    payload = _leb(1) + b"\x5E\x7F\x01"  # array of mutable i32
+    reader = BinaryReader(b"\x00asm\x01\x00\x00\x00" + _section(1, payload),
+                          _TypeCaptureDelegate())
+    reader.read_module()
+    assert reader.delegate.kinds == {0: "array"}
+
+
+def test_unknown_comptype_tag_reports_error_and_skips_rest_of_section():
+    # 0x5D is the stack-switching `cont` form: unknown here, and its payload
+    # length is unknowable, so the rest of the type section must be abandoned
+    # with an error instead of decoded from a desynchronized offset.
+    payload = _leb(2) + b"\x60\x00\x00" + b"\x5D\x00\x00" + b"\x60\x01\x7F\x00"
+    reader = BinaryReader(b"\x00asm\x01\x00\x00\x00" + _section(1, payload),
+                          _TypeCaptureDelegate())
+    reader.read_module()
+    delegate = reader.delegate
+    assert delegate.types == [(0, [], [])]  # entries before the unknown tag
+    assert len(delegate.errors) == 1
+    assert "type section" in delegate.errors[0]
+
+
+def test_unknown_comptype_tag_still_parses_later_sections():
+    bad_types = _section(1, _leb(1) + b"\x5D\x00")
+    memory = _section(5, _leb(1) + b"\x00\x01")
+
+    class _MemoryDelegate(_TypeCaptureDelegate):
+        def __init__(self):
+            super().__init__()
+            self.memories = []
+
+        def on_memory(self, index, mn, mx, is64, shared=False, page_size_log2=None):
+            self.memories.append((index, mn))
+
+    reader = BinaryReader(
+        b"\x00asm\x01\x00\x00\x00" + bad_types + memory, _MemoryDelegate()
+    )
+    reader.read_module()
+    assert reader.delegate.memories == [(0, 1)]
+    assert reader.delegate.errors
+
+
+def test_truncated_type_section_reports_error():
+    payload = _leb(2) + b"\x60\x01\x7F"  # second entry claims results that never come
+    reader = BinaryReader(b"\x00asm\x01\x00\x00\x00" + _section(1, payload),
+                          _TypeCaptureDelegate())
+    reader.read_module()
+    assert reader.delegate.errors
+
+
+def test_type_count_beyond_section_payload_reports_error():
+    # count claims two entries but only one is present, and the section ends
+    # exactly on the entry boundary: the peek must fail as a parse error, not
+    # as an IndexError that the per-section handler swallows silently.
+    payload = _leb(2) + b"\x60\x00\x00"
+    reader = BinaryReader(b"\x00asm\x01\x00\x00\x00" + _section(1, payload),
+                          _TypeCaptureDelegate())
+    reader.read_module()
+    delegate = reader.delegate
+    assert [t[0] for t in delegate.types] == [0]
+    assert delegate.errors and "type section" in delegate.errors[0]
+
+
+def test_truncated_rec_group_reports_error():
+    # rec announces two members but the payload ends after the first.
+    payload = _leb(1) + b"\x4E\x02" + b"\x5F\x01\x7F\x00"
+    reader = BinaryReader(b"\x00asm\x01\x00\x00\x00" + _section(1, payload),
+                          _TypeCaptureDelegate())
+    reader.read_module()
+    assert reader.delegate.errors
+    assert "rec group" in reader.delegate.errors[0]
+
+
+def test_nested_rec_groups_are_rejected_without_recursing():
+    # Rec groups do not nest per the GC spec. A crafted chain of rec tags must
+    # report a parse error instead of recursing once per tag (which raised
+    # RecursionError before, silently discarding the whole section).
+    payload = _leb(1) + b"\x4E\x01" * 20000 + b"\x60\x00\x00"
+    reader = BinaryReader(b"\x00asm\x01\x00\x00\x00" + _section(1, payload),
+                          _TypeCaptureDelegate())
+    reader.read_module()
+    assert reader.delegate.types == []
+    assert reader.delegate.errors
+    assert "0x4e" in reader.delegate.errors[0]
+
+
+def test_peek_u8_raises_at_end_of_data():
+    reader = BinaryReader(b"\x00asm\x01\x00\x00\x00", _TypeCaptureDelegate())
+    reader.offset = reader.size
+    with pytest.raises(WasmParseError):
+        reader.peek_u8()

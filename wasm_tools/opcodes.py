@@ -11,6 +11,8 @@ Covers:
   - GC / reference types (0xFB prefix)
   - Threads / atomics (0xFE prefix)
   - Exceptions / control-flow extensions (0x08, 0x0A, 0x1F, 0xD5, 0xD6)
+  - Legacy exception handling (0x06, 0x07, 0x09, 0x18, 0x19; pre-renumbering
+    binaries still accepted by V8)
   - Return-call extensions (0x12, 0x13, 0x14, 0x15)
 """
 
@@ -41,6 +43,7 @@ class ImmType:
     BR_ON_CAST = 21  # castflags byte + label + 2 heap types
     TRY_TABLE_BLOCK = 22  # blocktype + catch list
     ATOMIC_FENCE = 23  # single reserved byte (0x00)
+    DELEGATE_LABEL = 24  # legacy try delegate: label index; closes the try block
 
 
 # ─── Core opcodes (prefix 0) ────────────────────────────────────────────────
@@ -53,7 +56,12 @@ _CORE: dict = {
     (0, 0x03): ("loop", ImmType.BLOCK_SIG),
     (0, 0x04): ("if", ImmType.BLOCK_SIG),
     (0, 0x05): ("else", ImmType.NONE),
+    # Legacy exception handling (superseded by try_table/throw/throw_ref but
+    # still emitted by older toolchains and accepted by V8).
+    (0, 0x06): ("try", ImmType.BLOCK_SIG),
+    (0, 0x07): ("catch", ImmType.INDEX),
     (0, 0x08): ("throw", ImmType.INDEX),
+    (0, 0x09): ("rethrow", ImmType.INDEX),
     (0, 0x0A): ("throw_ref", ImmType.NONE),
     (0, 0x0B): ("end", ImmType.NONE),
     (0, 0x0C): ("br", ImmType.INDEX),
@@ -66,6 +74,8 @@ _CORE: dict = {
     (0, 0x13): ("return_call_indirect", ImmType.CALL_INDIRECT),
     (0, 0x14): ("call_ref", ImmType.INDEX),
     (0, 0x15): ("return_call_ref", ImmType.INDEX),
+    (0, 0x18): ("delegate", ImmType.DELEGATE_LABEL),
+    (0, 0x19): ("catch_all", ImmType.NONE),
     (0, 0x1A): ("drop", ImmType.NONE),
     (0, 0x1B): ("select", ImmType.NONE),
     (0, 0x1C): ("select", ImmType.SELECT_T),

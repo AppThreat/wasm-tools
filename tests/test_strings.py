@@ -230,6 +230,8 @@ def test_str_007_url_only_is_medium_severity():
         memory_grow_ops=0,
         loop_memory_ops=0,
         loop_memory_funcs=set(),
+        loop_memory_grow_ops=0,
+        loop_grow_funcs=set(),
         format_detection={"kind": "core"},
         loop_max_depth=0,
         js_interface_detection={"detected": False},

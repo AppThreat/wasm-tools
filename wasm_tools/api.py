@@ -13,7 +13,12 @@ from .component import (
 from .graph import build_call_graph, sample_paths
 from .models import ObjdumpMode, ObjdumpOptions, ObjdumpState, SECTION_NAMES
 from .parser import BinaryReader
-from .strings import DEFAULT_MAX_STRINGS, analyze_strings, extract_strings
+from .strings import (
+    DEFAULT_MAX_STRINGS,
+    analyze_strings,
+    extract_custom_strings,
+    extract_strings,
+)
 from .visitor import BinaryReaderNop, BinaryReaderObjdumpPrepass
 
 
@@ -25,6 +30,9 @@ _HIGH_RISK_FINDING_WEIGHTS = {
     "WASM-FMT-005": 10,
     "WASM-JSCFG-006": 20,
     "WASM-STR-007": 20,
+    # Compatibility advisory, not an execution risk: keeps the risk score
+    # unchanged when relaxed SIMD is present.
+    "WASM-ISA-008": 0,
 }
 
 
@@ -191,7 +199,12 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
         state = self.objdump_state
 
         types = [
-            {"index": i, "params": list(t.params), "results": list(t.results)}
+            {
+                "index": i,
+                "kind": t.kind,
+                "params": list(t.params),
+                "results": list(t.results),
+            }
             for i, t in enumerate(state.types)
             if t is not None
         ]
@@ -305,7 +318,17 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
             strings, strings_truncated = extract_strings(
                 segments, min_len=strings_min_len
             )
+            # Secret/IoC detection stays data-segment only (the finding wording
+            # promises that provenance); .debug_str hits are reported for the
+            # analyst without feeding the detection heuristics.
             strings_detection = analyze_strings(strings)
+            if state.debug_str_payload:
+                debug_strings, debug_truncated = extract_custom_strings(
+                    [("custom:.debug_str", state.debug_str_payload)],
+                    min_len=strings_min_len,
+                )
+                strings.extend(debug_strings)
+                strings_truncated = strings_truncated or debug_truncated
         else:
             strings, strings_truncated = [], False
             strings_detection = {
@@ -339,6 +362,7 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
             errors=self.errors,
             strings_detection=strings_detection,
             call_graph=call_graph,
+            memories=memories,
         )
 
         return {
@@ -412,6 +436,7 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
         strings_detection: dict[str, Any] | None = None,
         call_graph: dict[str, Any] | None = None,
         component_info: dict[str, Any] | None = None,
+        memories: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         op_counts: dict[str, int] = {}
         loop_max_depth = 0
@@ -422,6 +447,7 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
         callsite_conversion_ops = 0
         call_ref_unguarded_ops = 0
         memory_grow_ops = 0
+        loop_memory_grow_ops = 0
         bulk_memory_ops = 0
         memory_access_ops = 0
         unknown_opcode_count = 0
@@ -429,9 +455,13 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
         dynamic_funcs: set[int] = set()
         table_mutation_funcs: set[int] = set()
         loop_memory_funcs: set[int] = set()
+        loop_grow_funcs: set[int] = set()
         js_calling_funcs: set[int] = set()
 
-        block_openers = {"block", "loop", "if", "try_table"}
+        # `try` is the legacy exception block opener and `delegate` closes it
+        # without an `end`, so both need explicit handling to keep the block
+        # stack honest in binaries from older toolchains.
+        block_openers = {"block", "loop", "if", "try_table", "try"}
         table_mutators = {
             "table.set",
             "table.grow",
@@ -476,6 +506,8 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
                 elif op == "end" and block_stack:
                     if block_stack.pop() == "loop":
                         active_loops = max(0, active_loops - 1)
+                elif op == "delegate" and block_stack:
+                    block_stack.pop()
 
                 is_memory_access = (
                     op.startswith("i32.load")
@@ -501,6 +533,9 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
 
                 if op == "memory.grow":
                     memory_grow_ops += 1
+                    if active_loops > 0:
+                        loop_memory_grow_ops += 1
+                        loop_grow_funcs.add(fn.get("index", -1))
 
                 if op in bulk_memory:
                     bulk_memory_ops += 1
@@ -541,7 +576,15 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
                     table_mutation_ops += 1
                     table_mutation_funcs.add(fn.get("index", -1))
 
-        capabilities = sorted(self._capabilities_from_imports(imports))
+        capabilities = sorted(
+            self._capabilities_from_imports(imports)
+            | self._capabilities_from_opcodes(
+                op_counts,
+                memories if memories is not None else [],
+                imports=imports,
+                types=types,
+            )
+        )
         wasi_detection = self._wasi_signals_from_imports(imports, component_info)
         js_interface_detection = self._js_interface_signals(
             imports=imports,
@@ -582,6 +625,8 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
             loop_max_depth=loop_max_depth,
             loop_memory_ops=loop_memory_ops,
             loop_branch_ops=loop_branch_ops,
+            loop_memory_grow_ops=loop_memory_grow_ops,
+            loop_grow_funcs=loop_grow_funcs,
             indirect_call_ops=indirect_call_ops,
             table_mutation_ops=table_mutation_ops,
             dynamic_funcs=dynamic_funcs,
@@ -593,6 +638,9 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
             js_exposed_table_mutation_funcs=js_table_mutation_funcs,
             strings_detection=strings_detection,
             paths_from_export=paths_from_export,
+            relaxed_opcode_counts={
+                op: cnt for op, cnt in op_counts.items() if ".relaxed_" in op
+            },
         )
 
         cap_risk = {
@@ -652,6 +700,7 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
                 "memory": {
                     "memory_access_ops": memory_access_ops,
                     "memory_grow_ops": memory_grow_ops,
+                    "loop_memory_grow_ops": loop_memory_grow_ops,
                     "bulk_memory_ops": bulk_memory_ops,
                     "data_segment_total_bytes": sum(
                         ds.get("size", 0) for ds in data_segments
@@ -1105,6 +1154,11 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
         ):
             signals.append("component_or_toolchain_custom_section")
 
+        # DWARF debug sections: unstripped builds leak build paths and symbol
+        # names, which matters for triage and reverse engineering.
+        if any(name.startswith(".debug_") for name in custom_names):
+            signals.append("debug_info_present")
+
         if errors:
             signals.append("parse_errors")
 
@@ -1188,6 +1242,93 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
                 capabilities.add("js.host")
         return capabilities
 
+    def _capabilities_from_opcodes(
+        self,
+        op_counts: dict[str, int],
+        memories: list[dict[str, Any]],
+        imports: list[dict[str, Any]] | None = None,
+        types: list[dict[str, Any]] | None = None,
+    ) -> set[str]:
+        """Instruction-set capabilities from decoded opcodes and module types.
+
+        Import-derived tokens describe what the module asks of its host; these
+        describe which engine features the bytecode actually needs, which
+        decides portability before deployment (for example Wasmi gates simd
+        and memory64 behind crate features).
+        """
+        ops = set(op_counts)
+        caps: set[str] = set()
+        simd_lane_prefixes = (
+            "v128.",
+            "i8x16.",
+            "i16x8.",
+            "i32x4.",
+            "i64x2.",
+            "f32x4.",
+            "f64x2.",
+            "f16x8.",
+        )
+        if any(op.startswith(simd_lane_prefixes) for op in ops):
+            caps.add("isa.simd")
+        if any(".relaxed_" in op for op in ops):
+            caps.add("isa.relaxed-simd")
+        if any(
+            op.startswith(("memory.atomic.", "i32.atomic.", "i64.atomic."))
+            or op == "atomic.fence"
+            for op in ops
+        ):
+            caps.add("isa.atomics")
+        if any(
+            op.startswith(
+                ("struct.", "array.", "ref.test", "ref.cast", "ref.i31", "i31.get")
+            )
+            or op
+            in {
+                "any.convert_extern",
+                "extern.convert_any",
+                "br_on_cast",
+                "br_on_cast_fail",
+                "ref.eq",
+            }
+            for op in ops
+        ) or any(
+            # A struct/array type definition already requires GC support at
+            # instantiation time, even in a module that never executes a GC
+            # instruction (Kotlin/Wasm and dart2wasm emit type-heavy modules).
+            str(t.get("kind", "func")) in {"struct", "array"}
+            for t in (types or [])
+        ):
+            caps.add("isa.gc")
+        if {
+            "call_ref",
+            "return_call_ref",
+            "ref.as_non_null",
+            "br_on_null",
+            "br_on_non_null",
+        } & ops:
+            caps.add("isa.function-references")
+        if {"return_call", "return_call_indirect", "return_call_ref"} & ops:
+            caps.add("isa.tail-call")
+        if any(
+            isinstance(m.get("limits"), dict) and m["limits"].get("is_64")
+            for m in memories
+        ) or any(
+            # Emscripten-style modules import their memory, so the memory
+            # section alone misses the 64-bit index type.
+            imp.get("kind") == "memory"
+            and isinstance(imp.get("limits"), dict)
+            and imp["limits"].get("is_64")
+            for imp in (imports or [])
+        ):
+            caps.add("isa.memory64")
+        if {"i64.add128", "i64.sub128", "i64.mul_wide_s", "i64.mul_wide_u"} & ops:
+            caps.add("isa.wide-arithmetic")
+        if {"try", "catch", "rethrow", "delegate", "catch_all"} & ops:
+            caps.add("isa.legacy-exceptions")
+        if {"try_table", "throw", "throw_ref"} & ops:
+            caps.add("isa.exceptions")
+        return caps
+
     def _build_findings(self, **kwargs: Any) -> list[dict[str, Any]]:
         capabilities: list[str] = kwargs["capabilities"]
         indirect_call_ops: int = kwargs["indirect_call_ops"]
@@ -1197,6 +1338,8 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
         memory_grow_ops: int = kwargs["memory_grow_ops"]
         loop_memory_ops: int = kwargs["loop_memory_ops"]
         loop_memory_funcs: set[int] = kwargs["loop_memory_funcs"]
+        loop_memory_grow_ops: int = kwargs["loop_memory_grow_ops"]
+        loop_grow_funcs: set[int] = kwargs["loop_grow_funcs"]
         format_detection: dict[str, Any] = kwargs["format_detection"]
         loop_max_depth: int = kwargs["loop_max_depth"]
         js_interface_detection: dict[str, Any] = kwargs["js_interface_detection"]
@@ -1206,6 +1349,7 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
         ]
         strings_detection: dict[str, Any] | None = kwargs.get("strings_detection")
         paths_from_export: list[list[int]] = kwargs.get("paths_from_export", [])
+        relaxed_opcode_counts: dict[str, int] = kwargs.get("relaxed_opcode_counts", {})
 
         findings: list[dict[str, Any]] = []
 
@@ -1240,7 +1384,12 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
                 }
             )
 
-        if memory_grow_ops > 0 and loop_memory_ops > 0:
+        # Growth alone is routine (allocator startup); the amplification pattern
+        # is a memory.grow that executes inside a loop body, so that is what
+        # fires the rule. Loop-context memory ops alone are not enough: nearly
+        # every compiled program touches memory inside loops.
+        if loop_memory_grow_ops > 0:
+            grow_funcs = sorted(i for i in loop_grow_funcs if i >= 0)
             findings.append(
                 {
                     "id": "WASM-DOS-003",
@@ -1249,8 +1398,10 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
                     "confidence": "medium",
                     "evidence": {
                         "memory_grow_ops": memory_grow_ops,
+                        "loop_memory_grow_ops": loop_memory_grow_ops,
                         "loop_memory_ops": loop_memory_ops,
-                        "functions": sorted(i for i in loop_memory_funcs if i >= 0),
+                        "functions": grow_funcs[:50],
+                        **({"functions_truncated": True} if len(grow_funcs) > 50 else {}),
                     },
                     "remediation": "Apply growth limits and add explicit loop bounds when executing untrusted inputs.",
                 }
@@ -1346,6 +1497,24 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
                         "remediation": "Review the embedded strings; confirm no secrets, C2/mining endpoints, or other indicators are baked into the binary.",
                     }
                 )
+
+        if relaxed_opcode_counts:
+            # The closest a static tool gets to the Wasm deterministic profile:
+            # relaxed SIMD is the principal source of cross-engine numeric
+            # divergence, and engines like Wasm3 do not implement it at all.
+            findings.append(
+                {
+                    "id": "WASM-ISA-008",
+                    "title": "Relaxed SIMD instructions allow cross-engine numeric non-determinism",
+                    "severity": "low",
+                    "confidence": "high",
+                    "evidence": {
+                        "relaxed_opcode_count": sum(relaxed_opcode_counts.values()),
+                        "opcodes": sorted(relaxed_opcode_counts)[:20],
+                    },
+                    "remediation": "If bit-identical results across engines are required, recompile with strict SIMD or verify every target engine implements the relaxed semantics you rely on.",
+                }
+            )
 
         return findings
 
@@ -1473,7 +1642,13 @@ def _build_component_report(
             strings_truncated = strings_truncated or bool(
                 report.get("strings_truncated", False)
             )
-    strings_detection = analyze_strings(strings)
+    strings_detection = analyze_strings(
+        # Secret/IoC screening is data-segment only, exactly as in the core
+        # path: custom-section hits (.debug_str) carry a `source` label and
+        # must not raise WASM-STR-007, whose wording promises linear-memory
+        # provenance.
+        [entry for entry in strings if entry.get("source") is None]
+    )
 
     call_graph = None
     if include_call_graph:
@@ -1502,6 +1677,7 @@ def _build_component_report(
         strings_detection=strings_detection,
         call_graph=call_graph,
         component_info=component_info,
+        memories=memories,
     )
 
     toolchain = _component_toolchain(component)

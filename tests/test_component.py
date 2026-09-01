@@ -300,3 +300,24 @@ def test_detect_component_accepts_pre_0x0d_layer1_preambles():
     report = parse_wasm_bytes(b"\x00asm\x0a\x00\x01\x00", "old.wasm")
     assert report["is_component"] is True
     assert report["component"]["component_version"] == 10
+
+
+def test_component_debug_str_strings_do_not_feed_secret_screening():
+    # A nested core module with a DWARF .debug_str section: the value is
+    # reported for the analyst, but screening stays data-segment only, exactly
+    # as in the core path (WASM-STR-007 promises linear-memory provenance).
+    debug_payload = _name(".debug_str") + b"https://build.example.com/src/main.c\x00"
+    core = (
+        b"\x00asm\x01\x00\x00\x00"
+        + bytes([0])
+        + _leb(len(debug_payload))
+        + debug_payload
+    )
+    report = parse_wasm_bytes(_component([_section(1, core)]), "dbg.wasm")
+
+    assert report["is_component"] is True
+    detection = report["analysis"]["detections"]["strings"]
+    assert "url" not in detection["signals"]
+    assert [f["id"] for f in report["analysis"]["findings"] if f["id"] == "WASM-STR-007"] == []
+    debug_hits = [s for s in report["strings"] if s.get("source") == "custom:.debug_str"]
+    assert debug_hits and debug_hits[0]["value"].startswith("https://build.example.com")
