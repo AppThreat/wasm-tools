@@ -72,7 +72,7 @@ jobs:
 
       - name: Generate SBOM with cdxgen
         run: |
-          npm install -g @cyclonedx/cdxgen
+          npm install -g @cdxgen/cdxgen
           cdxgen -t python -o bom.json $(pwd) -p
 
       - name: Upload SBOM to release
