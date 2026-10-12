@@ -1,11 +1,15 @@
 name: CI
 
+# Test is a required status check on main, so this workflow must trigger on
+# merge-group builds too; the queue re-runs it on the speculative merge
+# commit.
 on:
   push:
     branches:
       - main
       - release/*
   pull_request:
+  merge_group:
 
 permissions: {}
 
