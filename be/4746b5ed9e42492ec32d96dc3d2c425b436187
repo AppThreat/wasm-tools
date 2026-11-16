@@ -1,0 +1,19 @@
+pyproject.toml
+  s_12c66afdba1c1b::t_c6294a1d40ca50 8
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "be4746b5ed9e42492ec32d96dc3d2c425b436187",
+  "prompts": {},
+  "sessions": {
+    "s_12c66afdba1c1b": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "sess_50fbe17e-c4e4-4823-8ac9-5873e47fa27a",
+        "model": "GLM-5.3"
+      },
+      "human_author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  }
+}
