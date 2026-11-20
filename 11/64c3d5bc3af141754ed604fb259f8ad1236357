@@ -1,0 +1,41 @@
+wasm_tools/obfuscation.py
+  s_f313f304041c9f::t_8c61e054390e81 189-190,192
+  s_f313f304041c9f::t_5a9a1a07a3eccb 1-41,51-127,134-138,143,145-146,150-156,158,161-188,191,193-247
+  s_f313f304041c9f::t_2258e6cfc80d49 42-50,139-142,157,159-160
+  s_f313f304041c9f::t_ac9c7cd208c9a5 128-133,144,147-149
+tests/test_json_api.py
+  s_f313f304041c9f::t_2762fbf0f646dc 1164
+  s_f313f304041c9f::t_88a190ba050d94 1328-1440
+  s_f313f304041c9f::t_fb7ba9b5716cb4 1441-1443
+wasm_tools/api.py
+  s_f313f304041c9f::t_2762fbf0f646dc 245-253
+  s_f313f304041c9f::t_48b992ddd6d361 18,47-48,91-99,494,626,980,1026-1027,1837-1839,2011-2061
+  s_f313f304041c9f::t_87038faaeb94ba 728,730-731,762-769,873,875-879
+  s_f313f304041c9f::t_2258e6cfc80d49 729,755-761,874
+  s_f313f304041c9f::t_5cb24c9ff36403 941-954
+tests/fixtures/control_flow_flattened.wat
+  s_f313f304041c9f::t_2258e6cfc80d49 67-75
+  s_f313f304041c9f::t_ac9c7cd208c9a5 1-3,7-63
+  s_f313f304041c9f::t_3f8df8cea8a2a0 4-6,64-66,76
+tests/fixtures/build.py
+  s_f313f304041c9f::t_2762fbf0f646dc 22-24
+tests/fixtures/thunk_swarm.wat
+  s_f313f304041c9f::t_3f8df8cea8a2a0 1-42,46
+  s_f313f304041c9f::t_2762fbf0f646dc 43-45
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "1164c3d5bc3af141754ed604fb259f8ad1236357",
+  "prompts": {},
+  "sessions": {
+    "s_f313f304041c9f": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "sess_02a3d826-3148-4c5e-a179-e38422bb7d90",
+        "model": "GLM-5.3"
+      },
+      "human_author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  }
+}
