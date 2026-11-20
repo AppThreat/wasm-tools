@@ -160,6 +160,60 @@ def test_f16x8_simd_ops_in_table():
         assert OPCODES[(0xFD, code)] == (name, ImmType.NONE)
 
 
+def test_f16x8_binary_arithmetic_in_table():
+    # Half-precision proposal opcode table (0x13d-0x14f under the 0xFD
+    # prefix): binary arithmetic, then conversions and FMA forms.
+    for code, name in (
+        (317, "f16x8.add"),
+        (318, "f16x8.sub"),
+        (319, "f16x8.mul"),
+        (320, "f16x8.div"),
+        (321, "f16x8.min"),
+        (322, "f16x8.max"),
+        (323, "f16x8.pmin"),
+        (324, "f16x8.pmax"),
+        (325, "i16x8.trunc_sat_f16x8_s"),
+        (326, "i16x8.trunc_sat_f16x8_u"),
+        (327, "f16x8.convert_i16x8_s"),
+        (328, "f16x8.convert_i16x8_u"),
+        (329, "f16x8.demote_f32x4_zero"),
+        (330, "f16x8.demote_f64x2_zero"),
+        (331, "f32x4.promote_low_f16x8"),
+        (332, "i16x8.trunc_f16x8_s"),
+        (333, "i16x8.trunc_f16x8_u"),
+        (334, "f16x8.madd"),
+        (335, "f16x8.nmadd"),
+    ):
+        assert OPCODES[(0xFD, code)] == (name, ImmType.NONE)
+
+
+def test_f16x8_binary_dispatch():
+    # 0xFD 0x13d (317) = f16x8.add, no immediates; LEB for 317 is 0xBD 0x02.
+    ops = _decode_body(b"\xFD\xBD\x02\x0B")
+    assert ops[0] == ["f16x8.add", []]
+    # 0xFD 0xC2 0x02 = 0x142 = f16x8.max.
+    ops = _decode_body(b"\xFD\xC2\x02\x0B")
+    assert ops[0] == ["f16x8.max", []]
+
+
+def test_f16x8_binary_fixture_decodes_cleanly():
+    data = (_FIXTURES / "f16x8_binary.wasm").read_bytes()
+    report = parse_wasm_bytes(data)
+    assert report["errors"] == []
+    assert report["analysis"]["summary"]["unknown_opcode_count"] == 0
+    ops = [i["opcode"] for fn in report["functions"] for i in fn["instructions"]]
+    for name in (
+        "f16x8.add",
+        "f16x8.pmax",
+        "f16x8.madd",
+        "f16x8.nmadd",
+        "f32x4.promote_low_f16x8",
+        "i16x8.trunc_f16x8_u",
+    ):
+        assert name in ops
+    assert not any(op.startswith("unknown_") for op in ops)
+
+
 def test_f16_dispatch():
     # 0xFC 0x30 = f32.load_f16 with memarg align=2 offset=0
     ops = _decode_body(b"\xFC\x30\x02\x00\x0B")

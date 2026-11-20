@@ -321,3 +321,89 @@ def test_component_debug_str_strings_do_not_feed_secret_screening():
     assert [f["id"] for f in report["analysis"]["findings"] if f["id"] == "WASM-STR-007"] == []
     debug_hits = [s for s in report["strings"] if s.get("source") == "custom:.debug_str"]
     assert debug_hits and debug_hits[0]["value"].startswith("https://build.example.com")
+
+
+# ─── WASI 0.3 async canon built-ins and name attributes ─────────────────────
+
+
+def _nameattributes_with_attributes(
+    name: str, attributes: list[tuple[int, str]]
+) -> bytes:
+    # nameattributes ::= 0x02 len:u32 externname vec(attribute)
+    payload = bytes([0x02]) + _name(name)
+    payload += _leb(len(attributes))
+    for kind, value in attributes:
+        payload += bytes([kind]) + _name(value)
+    return payload
+
+
+def test_component_async_canon_builtins_decode():
+    # WASI 0.3 async-era canon built-ins (Binary.md canon grammar):
+    # stream.new (0x0e t), task.return (0x09 resultlist opts),
+    # thread.spawn-ref (0x40 sh? ft), error-context.drop (0x1e).
+    stream_new = b"\x0e" + _leb(1)
+    task_return = b"\x09" + b"\x01\x00" + _leb(0)  # resultlist 0x01 0x00, opts []
+    spawn_ref = b"\x40" + b"\x00" + _leb(2)
+    error_drop = b"\x1e"
+    canon = _section(8, _leb(4) + stream_new + task_return + spawn_ref + error_drop)
+    report = parse_wasm_bytes(_component([canon]), "canon03.wasm")
+
+    assert report["is_component"] is True
+    builtins = report["component"]["canonical_options"]["builtins"]
+    assert builtins == {
+        "stream.new": 1,
+        "task.return": 1,
+        "thread.spawn-ref": 1,
+        "error-context.drop": 1,
+    }
+    assert report["errors"] == []
+
+
+def test_component_unknown_canon_kind_still_abandons_section():
+    # A canon kind outside every decoded shape must still abandon the
+    # section (the pre-0.3 resilience contract), not raise.
+    canon = _section(8, _leb(1) + b"\xfe")
+    report = parse_wasm_bytes(_component([canon]), "canonx.wasm")
+    assert report["is_component"] is True
+    assert any("canon kind" in err for err in report["errors"])
+
+
+def test_component_name_attributes_surface_and_feed_wasi_detection():
+    # WASI 0.3.1 nameattributes: a plain-named import carrying
+    # implements "wasi:http/client@0.3.2" must reach interface and WASI
+    # detection through the attribute value.
+    imports = _section(
+        10,
+        _leb(1)
+        + _nameattributes_with_attributes("client", [(0x00, "wasi:http/client@0.3.2")])
+        + b"\x01"
+        + _leb(0),
+    )
+    report = parse_wasm_bytes(_component([imports]), "attr03.wasm")
+
+    component = report["component"]
+    entry = component["imports"][0]
+    assert entry["name"] == "client"
+    assert entry["attributes"] == [
+        {"kind": "implements", "value": "wasi:http/client@0.3.2"}
+    ]
+    assert component["interfaces"] == ["wasi:http/client@0.3.2"]
+    wasi = report["analysis"]["detections"]["wasi"]
+    assert wasi["detected"] is True
+    assert "preview3" in wasi["variants"]
+    assert "wasi:http/client@0.3.2" in wasi["import_modules"]
+
+
+def test_component_composite_valuebound_skips_cleanly():
+    # Value imports can carry composite valtypes in 0.3 binaries: the
+    # reader must skip their (length-deterministic) payloads instead of
+    # abandoning the import section.
+    # value desc: 0x02 (value), bound 0x01, 0x66 stream, 0x01 has element,
+    # 0x74 char.
+    stream_of_char = b"\x02\x01\x66\x01\x74"
+    imports = _section(10, _leb(1) + _externname("pipe") + stream_of_char)
+    report = parse_wasm_bytes(_component([imports]), "stream.wasm")
+
+    assert report["is_component"] is True
+    assert report["component"]["imports"][0]["valtype"] == "stream"
+    assert report["errors"] == []

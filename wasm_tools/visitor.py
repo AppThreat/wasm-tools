@@ -268,6 +268,9 @@ class BinaryReaderObjdumpPrepass(BinaryReaderObjdumpBase):
         if name == ".debug_str":
             self.objdump_state.debug_str_payload = bytes(payload)
 
+    def on_branch_hints(self, name: str, hinted_functions: Optional[int]) -> None:
+        self.objdump_state.branch_hints = (name, hinted_functions)
+
 
 class BinaryReaderObjdumpHeaders(BinaryReaderObjdumpBase):
     """Emit a section-header table (wasm-objdump -h style)."""

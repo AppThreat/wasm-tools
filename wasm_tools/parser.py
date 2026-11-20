@@ -415,6 +415,20 @@ class BinaryReader:
             self.delegate.on_debug_section(
                 name, memoryview(self.data)[self.offset : end_offset]
             )
+        elif name == "metadata.code.branch_hint" and hasattr(
+            self.delegate, "on_branch_hints"
+        ):
+            # Branch hinting proposal (tool-conventions CodeMetadata.md): the
+            # payload is vec(function) where each entry is a function index
+            # followed by a vector of (relative offset, hint) pairs. The
+            # top-level count names the hinted functions, which is enough for
+            # format signals; full per-branch decode is left to the custom
+            # section catalog.
+            try:
+                hinted_functions = self.read_leb128(max_bits=32)
+            except WasmParseError:
+                hinted_functions = None
+            self.delegate.on_branch_hints(name, hinted_functions)
 
     def _read_comptype(self) -> Tuple[str, List[str], List[str]]:
         """Read one subtype/composite type; return (kind, params, results).

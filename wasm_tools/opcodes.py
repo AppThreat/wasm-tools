@@ -635,6 +635,26 @@ _FD: dict = dict(
         _simd_bare(314, "f16x8.gt"),
         _simd_bare(315, "f16x8.le"),
         _simd_bare(316, "f16x8.ge"),
+        # f16x8 binary arithmetic and conversions (half-precision proposal)
+        _simd_bare(317, "f16x8.add"),
+        _simd_bare(318, "f16x8.sub"),
+        _simd_bare(319, "f16x8.mul"),
+        _simd_bare(320, "f16x8.div"),
+        _simd_bare(321, "f16x8.min"),
+        _simd_bare(322, "f16x8.max"),
+        _simd_bare(323, "f16x8.pmin"),
+        _simd_bare(324, "f16x8.pmax"),
+        _simd_bare(325, "i16x8.trunc_sat_f16x8_s"),
+        _simd_bare(326, "i16x8.trunc_sat_f16x8_u"),
+        _simd_bare(327, "f16x8.convert_i16x8_s"),
+        _simd_bare(328, "f16x8.convert_i16x8_u"),
+        _simd_bare(329, "f16x8.demote_f32x4_zero"),
+        _simd_bare(330, "f16x8.demote_f64x2_zero"),
+        _simd_bare(331, "f32x4.promote_low_f16x8"),
+        _simd_bare(332, "i16x8.trunc_f16x8_s"),
+        _simd_bare(333, "i16x8.trunc_f16x8_u"),
+        _simd_bare(334, "f16x8.madd"),
+        _simd_bare(335, "f16x8.nmadd"),
     ]
 )
 

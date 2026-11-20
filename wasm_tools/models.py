@@ -226,6 +226,10 @@ class ObjdumpState:
         self.type_kinds: Dict[int, str] = {}
         # Raw .debug_str custom-section payload when present (DWARF strings).
         self.debug_str_payload: Optional[bytes] = None
+        # metadata.code.branch_hint custom section: (section name, hinted
+        # function count) when present; the count is None when the payload is
+        # malformed.
+        self.branch_hints: Optional[Tuple[str, Optional[int]]] = None
         self.imports: List[ImportEntry] = []
         self.exports: List[ExportEntry] = []
         self.globals: List[GlobalEntry] = []

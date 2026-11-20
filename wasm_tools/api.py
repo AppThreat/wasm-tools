@@ -61,6 +61,7 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
         self._functions: dict[int, dict[str, Any]] = {}
         self._current_function: dict[str, Any] | None = None
         self._pending_instruction: dict[str, Any] | None = None
+        self.branch_hints: tuple[str, int | None] | None = None
 
     def begin_module(self, version: int) -> None:
         """Capture the module version from the binary header."""
@@ -84,6 +85,10 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
         """Attach custom section names to the last-recorded section."""
         if self.sections:
             self.sections[-1]["name"] = section_name
+
+    def on_branch_hints(self, name: str, hinted_functions: int | None) -> None:
+        """Record the metadata.code.branch_hint custom section summary."""
+        self.branch_hints = (name, hinted_functions)
 
     def begin_function_body(self, index: int, size: int) -> None:
         """Start collecting instructions for a function body."""
@@ -585,6 +590,12 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
                 types=types,
             )
         )
+        if any(
+            int(sec.get("id", -1)) == 0
+            and str(sec.get("name", "")) == "metadata.code.branch_hint"
+            for sec in sections
+        ):
+            capabilities.append("isa.branch-hints")
         wasi_detection = self._wasi_signals_from_imports(imports, component_info)
         js_interface_detection = self._js_interface_signals(
             imports=imports,
@@ -656,6 +667,7 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
             "host.global": 2,
             "host.tag": 2,
             "js.host": 6,
+            "js-strings": 6,
         }
         capability_score = sum(cap_risk.get(cap, 0) for cap in capabilities)
         findings_score = sum(
@@ -929,6 +941,12 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
             functions=function_map,
         )
 
+        js_string_builtins = sum(
+            1 for imp in imports if str(imp.get("module", "")) == "wasm:js-string"
+        )
+        if js_string_builtins:
+            signals.add("js_string_builtins")
+
         # Confidence is tied to explicit namespace signals before name heuristics.
         if {"js_namespace_import", "wasm_builtin_namespace_import"}.intersection(
             signals
@@ -947,6 +965,7 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
             "import_count": len(js_imports),
             "export_count": len(js_exports),
             "builtin_sets": builtin_sets,
+            "js_string_builtins": js_string_builtins,
             "imports": js_imports,
             "exports": js_exports,
             "signature_surface": {
@@ -1159,6 +1178,10 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
         if any(name.startswith(".debug_") for name in custom_names):
             signals.append("debug_info_present")
 
+        # Branch hinting proposal: metadata.code.branch_hint custom section.
+        if "metadata.code.branch_hint" in custom_names:
+            signals.append("branch_hints_present")
+
         if errors:
             signals.append("parse_errors")
 
@@ -1239,6 +1262,12 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
                 if "abort" in name or name == "proc_exit":
                     capabilities.add("process.terminate")
             if module in {"wbg", "js"}:
+                capabilities.add("js.host")
+            if module == "wasm:js-string":
+                # JS String Builtins (phase 5): a reserved JS-API builtin set.
+                # The host surface is still JavaScript, so it carries the same
+                # weight as js.host.
+                capabilities.add("js-strings")
                 capabilities.add("js.host")
         return capabilities
 
@@ -1615,14 +1644,30 @@ def _build_component_report(
     # Surface component interface imports as import records so the WASI and
     # capability detections see the component's host demands.
     for entry in component.get("imports", []):
-        imports.append(
-            {
-                "module": str(entry.get("name", "")),
-                "name": "",
-                "kind": "component-" + str(entry.get("kind", "unknown")),
-                "core_module": None,
-            }
-        )
+        record = {
+            "module": str(entry.get("name", "")),
+            "name": "",
+            "kind": "component-" + str(entry.get("kind", "unknown")),
+            "core_module": None,
+        }
+        attributes = entry.get("attributes") or []
+        if attributes:
+            record["attributes"] = attributes
+        imports.append(record)
+        # WASI 0.3.1 lets a plain-named import carry an `implements`
+        # attribute naming the real interface; capability detection must see
+        # the implemented interface, not just the plain name.
+        for attr in attributes:
+            implemented = str(attr.get("value", ""))
+            if attr.get("kind") == "implements" and ":" in implemented:
+                imports.append(
+                    {
+                        "module": implemented,
+                        "name": "",
+                        "kind": "component-implements",
+                        "core_module": None,
+                    }
+                )
 
     errors = list(component_errors)
     for report in component.get("core_modules", []):

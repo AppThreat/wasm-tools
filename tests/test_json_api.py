@@ -681,3 +681,78 @@ def test_memory_profile_exposes_loop_growth_counter():
     assert report["analysis"]["profiles"]["memory"]["loop_memory_grow_ops"] >= 1
     assert linear["analysis"]["profiles"]["memory"]["loop_memory_grow_ops"] == 0
     assert linear["analysis"]["profiles"]["memory"]["memory_grow_ops"] >= 1
+
+
+# ─── WASM 3.0-era coverage: JS String Builtins, branch hints, multi-memory ──
+
+
+def _leb(n: int) -> bytes:
+    out = bytearray()
+    while True:
+        b = n & 0x7F
+        n >>= 7
+        if n:
+            out.append(b | 0x80)
+        else:
+            out.append(b)
+            return bytes(out)
+
+
+def _name(s: str) -> bytes:
+    raw = s.encode("utf-8")
+    return _leb(len(raw)) + raw
+
+
+def test_parse_wasm_file_detects_js_string_builtins():
+    raw = _fixture_bytes("js_string.wasm")
+    report = parse_wasm_bytes(raw, "js_string.wasm")
+
+    analysis = report["analysis"]
+    assert "js-strings" in analysis["capabilities"]
+    assert "js.host" in analysis["capabilities"]
+    js_detection = analysis["detections"]["js_interface"]
+    assert js_detection["detected"] is True
+    assert "js_string_builtins" in js_detection["signals"]
+    assert js_detection["js_string_builtins"] == 3
+    assert js_detection["builtin_sets"] == ["js-string"]
+
+
+def test_js_string_capability_carries_js_host_risk_weight():
+    raw = _fixture_bytes("js_string.wasm")
+    report = parse_wasm_bytes(raw, "js_string.wasm")
+    analysis = report["analysis"]
+    # js-strings adds the same 6-point weight as js.host, on top of any other
+    # scoring, so the risk score must reflect it.
+    assert analysis["summary"]["risk_score"] >= 6
+
+
+def test_parse_wasm_file_reports_multi_memory():
+    raw = _fixture_bytes("multi_memory.wasm")
+    report = parse_wasm_bytes(raw, "multi_memory.wasm")
+
+    assert report["errors"] == []
+    assert len(report["memories"]) == 2
+    # memory.copy immediates are (dst_mem, src_mem, dst, src, len) in the
+    # visitor's rendering and [dst_mem, src_mem, dst, src, len]-shaped in
+    # JSON (JSON_REFERENCE documents the memory.init order [data, mem]; the
+    # copy order follows the binary: dst, src, then offsets).
+    ops = [i["opcode"] for fn in report["functions"] for i in fn["instructions"]]
+    assert "memory.copy" in ops
+    assert "memory.fill" in ops
+    # The data segment points at the second memory (mem_idx 1).
+    data_segments = report["data_segments"]
+    assert len(data_segments) == 1
+    assert data_segments[0].get("memory_index", data_segments[0].get("mem_idx", 1)) == 1
+
+
+def test_parse_wasm_file_reports_branch_hints():
+    # metadata.code.branch_hint custom section (branch-hinting proposal):
+    # payload is vec(function) per tool-conventions CodeMetadata.md; a
+    # top-level count of 2 functions is enough for the signal.
+    hint_payload = _leb(2) + _leb(0) + _leb(1) + b"\x01\x00\x01" + _leb(1) + _leb(1) + b"\x01\x04\x00"
+    hint_section = bytes([0]) + _leb(len(_name("metadata.code.branch_hint") + hint_payload)) + _name("metadata.code.branch_hint") + hint_payload
+    core = b"\x00asm\x01\x00\x00\x00" + hint_section
+    report = parse_wasm_bytes(core, "hints.wasm")
+
+    assert "branch_hints_present" in report["analysis"]["detections"]["format"]["signals"]
+    assert "isa.branch-hints" in report["analysis"]["capabilities"]
