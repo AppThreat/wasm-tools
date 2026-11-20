@@ -1161,6 +1161,7 @@ def test_finding_vocabulary_and_evidence_registry_across_fixtures():
         "js_deopt_surface.wasm",
         "call_indirect.wasm",
         "miner_shaped.wasm",
+        "control_flow_flattened.wasm",
         "corpus/bz2.wasm",
         "corpus/erc20.wasm",
     ]
@@ -1324,3 +1325,142 @@ def test_miner_finding_evidence_matches_registry():
     )
     extra = set(finding["evidence"]) - _FINDING_EVIDENCE_KEYS["WASM-MIN-009"]
     assert not extra
+
+
+# ─── Obfuscation detection (P07) ─────────────────────────────────────────────
+
+
+def test_obfuscation_dispatcher_signal_and_finding():
+    raw = _fixture_bytes("control_flow_flattened.wasm")
+    report = parse_wasm_bytes(raw, "cff.wasm")
+    detection = report["analysis"]["detections"].get("obfuscation")
+    assert detection is not None
+    assert "dispatcher_loop" in detection["signals"]
+    finding = next(
+        f for f in report["analysis"]["findings"] if f["id"] == "WASM-OBF-010"
+    )
+    assert finding["severity"] == "medium"  # single strong signal
+    assert "dispatcher_loop" in finding["evidence"]["signals"]
+    assert finding["evidence"]["dispatcher_functions"]
+
+
+def test_obfuscation_thunk_swarm_signal_never_fires_alone():
+    raw = _fixture_bytes("thunk_swarm.wasm")
+    report = parse_wasm_bytes(raw, "thunks.wasm")
+    detection = report["analysis"]["detections"].get("obfuscation")
+    assert detection is not None
+    assert "thunk_swarm" in detection["signals"]
+    ids = [f["id"] for f in report["analysis"]["findings"]]
+    assert "WASM-OBF-010" not in ids, "thunk swarm alone stays below the bar"
+
+
+def test_obfuscation_packed_data_signal():
+    def _leb(n):
+        out = bytearray()
+        while True:
+            b = n & 0x7F
+            n >>= 7
+            if n:
+                out.append(b | 0x80)
+            else:
+                out.append(b)
+                return bytes(out)
+
+    # A deterministic high-entropy segment: bytes from an LCG, fixed seed,
+    # so the fixture needs no binary blob in the repo.
+    blob = bytearray()
+    state = 0x12345678
+    for _ in range(1024):
+        state = (state * 1103515245 + 12345) & 0x7FFFFFFF
+        blob.append(state & 0xFF)
+    data_payload = (
+        _leb(1) + _leb(0) + b"\x41\x00\x0b" + _leb(len(blob)) + bytes(blob)
+    )
+    data_section = bytes([11]) + _leb(len(data_payload)) + data_payload
+    memory_section = bytes([5]) + _leb(2) + _leb(1) + _leb(2)  # two pages
+    packed_module = (
+        b"\x00asm\x01\x00\x00\x00" + memory_section + data_section
+    )
+    report = parse_wasm_bytes(packed_module, "packed.wasm")
+    detection = report["analysis"]["detections"].get("obfuscation")
+    assert detection is not None
+    assert "packed_data" in detection["signals"]
+    packed = detection["signal_details"]["packed_data"]["metric"]
+    assert packed and packed[0]["entropy"] >= 7.2
+
+
+def test_obfuscation_single_weak_signals_report_without_finding():
+    raw = _fixture_bytes("unreachable.wasm")
+    report = parse_wasm_bytes(raw, "u.wasm")
+    detection = report["analysis"]["detections"].get("obfuscation")
+    if detection is not None:
+        # Weak signals may be reported, but never fire the finding alone.
+        assert detection["score"] < 30 or len(
+            set(detection["signals"])
+            & {"dispatcher_loop", "packed_data", "duplicate_body_ratio"}
+        ) >= 1
+
+
+def test_obfuscation_duplicate_bodies_signal():
+    # duplicate_bodies has 3 functions, below the 20-function bar, so no
+    # signal; the ratio machinery is exercised through the direct helper.
+    from wasm_tools.obfuscation import build_obfuscation_detection
+
+    functions = [
+        {"index": i, "features": {"body_hash": f"sha256:{i % 2}", "instruction_count": 5}}
+        for i in range(20)
+    ]
+    detection = build_obfuscation_detection(
+        functions=functions,
+        exports=[],
+        data_segments=[],
+        segment_payloads=[],
+        dylink=None,
+        custom_section_names=set(),
+        has_name_section=False,
+    )
+    assert detection is not None
+    assert detection["signal_details"]["duplicate_body_ratio"]["metric"] >= 0.4
+
+
+def test_obfuscation_finding_evidence_matches_registry():
+    from wasm_tools.api import _FINDING_EVIDENCE_KEYS
+
+    raw = _fixture_bytes("control_flow_flattened.wasm")
+    report = parse_wasm_bytes(raw, "cff.wasm")
+    finding = next(
+        f for f in report["analysis"]["findings"] if f["id"] == "WASM-OBF-010"
+    )
+    extra = set(finding["evidence"]) - _FINDING_EVIDENCE_KEYS["WASM-OBF-010"]
+    assert not extra
+
+
+def test_obfuscation_corpus_stays_clean():
+    for name in ("corpus/bz2.wasm", "corpus/erc20.wasm", "corpus/erc721.wasm",
+                 "corpus/erc1155.wasm"):
+        report = parse_wasm_bytes(_fixture_bytes(name), name)
+        ids = [f["id"] for f in report["analysis"]["findings"]]
+        assert "WASM-OBF-010" not in ids, f"{name} must stay clean"
+
+
+def test_data_segments_carry_entropy():
+    def _leb(n):
+        out = bytearray()
+        while True:
+            b = n & 0x7F
+            n >>= 7
+            if n:
+                out.append(b | 0x80)
+            else:
+                out.append(b)
+                return bytes(out)
+
+    text_payload = _leb(1) + _leb(0) + b"\x41\x00\x0b" + _leb(4) + b"abcd"
+    data_section = bytes([11]) + _leb(len(text_payload)) + text_payload
+    memory_section = bytes([5]) + _leb(1) + _leb(1)
+    module = b"\x00asm\x01\x00\x00\x00" + memory_section + data_section
+    report = parse_wasm_bytes(module, "seg.wasm")
+    segment = report["data_segments"][0]
+    assert "entropy" in segment
+    # Repeated printable bytes: low entropy, nowhere near packed.
+    assert segment["entropy"] < 4.0

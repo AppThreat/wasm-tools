@@ -19,6 +19,9 @@ _EXTRA_FLAGS: dict = {
     "table_fill64.wat": ["--enable-memory64"],
     "table_set64.wat": ["--enable-memory64"],
     "table_size64.wat": ["--enable-memory64"],
+    # The thunk-swarm obfuscation fixture needs a name section so the
+    # name_section_stripped signal does not stack onto it.
+    "thunk_swarm.wat": ["--debug-names"],
 }
 
 # Final-spec GC text (rec groups, struct/array instructions, abstract heap

@@ -15,6 +15,7 @@ from .component import (
 )
 from .customsections import name_precedence_names
 from .features import build_features, evaluate_miner_heuristic
+from .obfuscation import build_obfuscation_detection
 from .demangle import demangle
 from .provenance import build_provenance
 from .graph import build_call_graph, merge_component_graphs, sample_paths
@@ -43,6 +44,8 @@ _HIGH_RISK_FINDING_WEIGHTS = {
     # Structural advisory: numeric libraries can match the shape, so the
     # weight stays light.
     "WASM-MIN-009": 10,
+    # Multi-signal obfuscation evidence; the score already gates firing.
+    "WASM-OBF-010": 15,
 }
 
 # Machine-checkable evidence contract (docs/JSON_REFERENCE.md): every
@@ -84,6 +87,15 @@ _FINDING_EVIDENCE_KEYS: dict[str, set[str]] = {
         "exported_function_count",
         "mining_strings",
         "thresholds",
+    },
+    "WASM-OBF-010": {
+        "score",
+        "signals",
+        "dispatcher_functions",
+        "packed_segments",
+        "duplicate_body_ratio",
+        "median_function_instructions",
+        "exported_function_count",
     },
 }
 
@@ -229,6 +241,15 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
     def on_opcode_f64(self, val: float) -> None:
         """Finalize opcodes with one 64-bit float immediate."""
         self._append_immediates(val)
+
+    def on_opcode_br_table(self, targets: List[int], default: int) -> None:
+        """Record br_table immediates (target list then the default label)."""
+        if self._pending_instruction is None:
+            return
+        self._pending_instruction["immediates"].extend(
+            [int(v) for v in targets] + [int(default)]
+        )
+        self._finalize_instruction()
 
     def on_opcode_uint32_uint32(self, v1: int, v2: int) -> None:
         """Finalize opcodes with two integer immediates."""
@@ -381,8 +402,11 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
             if m is not None
         ]
 
-        data_segments = [
-            {
+        data_segments = []
+        for d in state.data_segments:
+            if d is None:
+                continue
+            entry = {
                 "index": d.index,
                 "mode": d.mode,
                 "memory_index": d.memory_index,
@@ -390,9 +414,11 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
                 "offset_value": d.offset_value,
                 "size": d.size,
             }
-            for d in state.data_segments
-            if d is not None
-        ]
+            if d.data:
+                # Segment-level entropy for packing analysis; computed here
+                # so every consumer sees it without re-reading bytes.
+                entry["entropy"] = _segment_entropy(d.data)
+            data_segments.append(entry)
 
         elements = [
             {
@@ -470,6 +496,7 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
             memories=memories,
             strings_list=strings,
             include_features=include_features,
+            segment_payloads=segments,
         )
 
         if include_demangled:
@@ -601,6 +628,7 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
         memories: list[dict[str, Any]] | None = None,
         strings_list: list[dict[str, Any]] | None = None,
         include_features: bool = True,
+        segment_payloads: list[tuple[int, bytes]] | None = None,
     ) -> dict[str, Any]:
         op_counts: dict[str, int] = {}
         loop_max_depth = 0
@@ -702,6 +730,10 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
             }
             imported_callees: set[int] = set()
             fn_mnemonics: list[str] = []
+            fn_max_br_table_in_loop = 0
+            fn_br_table_count = 0
+            fn_br_if_count = 0
+            fn_const_predicate_br = 0
             for ins_idx, ins in enumerate(instructions):
                 op = ins.get("opcode", "")
                 op_counts[op] = op_counts.get(op, 0) + 1
@@ -725,6 +757,21 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
 
                 if op == "loop":
                     fn_features["has_loop"] = True
+                if op == "br_table":
+                    fn_br_table_count += 1
+                    if active_loops > 0:
+                        targets = len(ins.get("immediates") or [])
+                        fn_max_br_table_in_loop = max(
+                            fn_max_br_table_in_loop, targets
+                        )
+                if op == "br_if":
+                    fn_br_if_count += 1
+                    nearby = instructions[max(0, ins_idx - 3) : ins_idx]
+                    if any(
+                        str(nearby_ins.get("opcode", "")) == "i32.const"
+                        for nearby_ins in nearby
+                    ):
+                        fn_const_predicate_br += 1
                 if op in {"call", "return_call"}:
                     fn_features["has_direct_call"] = True
                     if op == "return_call":
@@ -828,6 +875,13 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
             fn_features["max_loop_depth"] = fn_max_loop_depth
             fn_features["instruction_count"] = len(instructions)
             fn_features["imported_callees"] = len(imported_callees)
+            fn_features["max_br_table_targets_in_loop"] = fn_max_br_table_in_loop
+            fn_features["br_table_count"] = fn_br_table_count
+            fn_features["const_branch_density"] = (
+                round(fn_const_predicate_br / fn_br_if_count, 4)
+                if fn_br_if_count
+                else 0.0
+            )
             # body_hash covers the mnemonic sequence only (immediates
             # excluded), so two functions with the same instruction shape
             # hash identically regardless of constant values.
@@ -889,6 +943,20 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
             if include_features
             else None
         )
+        custom_names = {
+            str(sec.get("name", ""))
+            for sec in sections
+            if int(sec.get("id", -1)) == 0
+        }
+        obfuscation_detection = build_obfuscation_detection(
+            functions=functions,
+            exports=exports,
+            data_segments=data_segments,
+            segment_payloads=segment_payloads or [],
+            dylink=self.objdump_state.dylink,
+            custom_section_names=custom_names,
+            has_name_section=bool(self.objdump_state.function_names),
+        )
         findings = self._build_findings(
             capabilities=capabilities,
             memory_grow_ops=memory_grow_ops,
@@ -914,6 +982,7 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
                 op: cnt for op, cnt in op_counts.items() if ".relaxed_" in op
             },
             features_block=features_block,
+            obfuscation_detection=obfuscation_detection,
         )
 
         cap_risk = {
@@ -959,6 +1028,8 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
         }
         if strings_detection is not None:
             detections["strings"] = strings_detection
+        if obfuscation_detection is not None:
+            detections["obfuscation"] = obfuscation_detection
 
         return {
             "summary": {
@@ -1768,6 +1839,9 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
         paths_from_export: list[list[int]] = kwargs.get("paths_from_export", [])
         relaxed_opcode_counts: dict[str, int] = kwargs.get("relaxed_opcode_counts", {})
         features_block: dict[str, Any] | None = kwargs.get("features_block")
+        obfuscation_detection: dict[str, Any] | None = kwargs.get(
+            "obfuscation_detection"
+        )
 
         findings: list[dict[str, Any]] = []
 
@@ -1939,6 +2013,57 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
             if features_block is not None
             else None
         )
+        if obfuscation_detection is not None:
+            from .obfuscation import FINDING_SCORE_THRESHOLD, STRONG_SIGNALS
+
+            signals_present = set(obfuscation_detection.get("signals", []))
+            strong = signals_present & STRONG_SIGNALS
+            score = obfuscation_detection.get("score", 0)
+            if score >= FINDING_SCORE_THRESHOLD:
+                severity = "high" if len(strong) >= 2 else "medium"
+                findings.append(
+                    {
+                        "id": "WASM-OBF-010",
+                        "title": "Obfuscation or packing signals present",
+                        "severity": severity,
+                        "confidence": "medium",
+                        "evidence": {
+                            "score": score,
+                            "signals": sorted(signals_present),
+                            "dispatcher_functions": obfuscation_detection.get(
+                                "signal_details", {}
+                            )
+                            .get("dispatcher_loop", {})
+                            .get("metric", {})
+                            .get("dispatcher_functions", [])
+                            if isinstance(
+                                obfuscation_detection.get("signal_details", {})
+                                .get("dispatcher_loop", {})
+                                .get("metric", {}),
+                                dict,
+                            )
+                            else [],
+                            "packed_segments": obfuscation_detection.get(
+                                "signal_details", {}
+                            )
+                            .get("packed_data", {})
+                            .get("metric", []),
+                            "duplicate_body_ratio": obfuscation_detection.get(
+                                "signal_details", {}
+                            )
+                            .get("duplicate_body_ratio", {})
+                            .get("metric", 0.0),
+                            "median_function_instructions": obfuscation_detection.get(
+                                "median_function_instructions"
+                            ),
+                            "exported_function_count": obfuscation_detection.get(
+                                "exported_function_count"
+                            ),
+                        },
+                        "remediation": "Review the flagged shapes against the module's expected origin; single weak signals are reported in detections.obfuscation without a finding.",
+                    }
+                )
+
         if miner_evidence is not None:
             findings.append(
                 {
@@ -1992,6 +2117,24 @@ def _trim_function_instructions(
     fn["instructions_truncated"] = True
     fn["instructions"] = instructions[:cap]
     return True
+
+
+def _segment_entropy(data: bytes) -> float:
+    """Byte-level Shannon entropy of a data segment payload."""
+    import math
+
+    if not data:
+        return 0.0
+    counts: dict[int, int] = {}
+    for byte in data:
+        counts[byte] = counts.get(byte, 0) + 1
+    size = len(data)
+    entropy = 0.0
+    for count in counts.values():
+        probability = count / size
+        if probability:
+            entropy -= probability * math.log2(probability)
+    return round(entropy, 4)
 
 
 def _strip_instruction_streams(functions: list[dict[str, Any]]) -> None:
