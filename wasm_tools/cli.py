@@ -406,6 +406,27 @@ def main() -> None:
         help="Skip call graph construction in --json reports",
     )
     parser.add_argument(
+        "--carve",
+        action="store_true",
+        help="Scan the input for embedded wasm blobs (any file type) and "
+        "report their spans and quick summaries",
+    )
+    parser.add_argument(
+        "--carve-full",
+        action="store_true",
+        help="With --carve, emit the full report for every blob",
+    )
+    parser.add_argument(
+        "--carve-decode",
+        action="store_true",
+        help="With --carve, also decode long base64 runs and rescan them",
+    )
+    parser.add_argument(
+        "--extract",
+        metavar="DIR",
+        help="With --carve, write each bounded blob to DIR/blob-<offset>.wasm",
+    )
+    parser.add_argument(
         "--no-features",
         action="store_true",
         help="Skip the analysis.features opcode statistics block in --json reports",
@@ -531,6 +552,53 @@ def main() -> None:
         except Exception as e:
             print(f"Error writing {args.json_out}: {e}", file=sys.stderr)
             sys.exit(1)
+        return
+
+    if args.carve:
+        for index, path in enumerate(files):
+            try:
+                with open(path, "rb") as f:
+                    data = f.read()
+            except Exception as e:
+                print(f"Error reading {path}: {e}", file=sys.stderr)
+                sys.exit(1)
+            from .carve import carve_wasm_bytes
+
+            carve_report = carve_wasm_bytes(
+                data, decode_base64=args.carve_decode
+            )
+            if args.carve_full:
+                from .api import parse_wasm_bytes as _parse
+
+                for record in carve_report["blobs"]:
+                    size = record.get("size")
+                    if size is None:
+                        record["report"] = None
+                        continue
+                    blob_bytes = data[
+                        record["offset"] : record["offset"] + size
+                    ]
+                    record["report"] = _parse(
+                        blob_bytes,
+                        filename=f"{path}@{record['offset']}",
+                        include_strings=False,
+                        include_call_graph=False,
+                    )
+            carve_report["file"] = path
+            if args.extract:
+                extract_dir = Path(args.extract)
+                extract_dir.mkdir(parents=True, exist_ok=True)
+                for record in carve_report["blobs"]:
+                    size = record.get("size")
+                    if size is None:
+                        continue
+                    blob_bytes = data[
+                        record["offset"] : record["offset"] + size
+                    ]
+                    out_path = extract_dir / f"blob-{record['offset']:08x}.wasm"
+                    out_path.write_bytes(blob_bytes)
+                    record["extracted_to"] = str(out_path)
+            print(json.dumps(carve_report, ensure_ascii=False, separators=(",", ":")))
         return
 
     multi = len(files) > 1
