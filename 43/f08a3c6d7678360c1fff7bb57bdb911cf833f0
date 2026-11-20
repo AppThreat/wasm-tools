@@ -1,0 +1,36 @@
+wasm_tools/dwarf.py
+  s_f313f304041c9f::t_1b32193ac34ed3 1-149,153-454
+  s_f313f304041c9f::t_9fa77c517b16ea 151-152
+  s_f313f304041c9f::t_cb35f94c20c267 150
+tests/test_dwarf.py
+  s_f313f304041c9f::t_925d7d668e4d3c 1-103,122-123,127-137,142,146-148,151-156,158-159,164,166-219
+  s_f313f304041c9f::t_93d2eac7a60406 138-141,143-145,149-150,160-163,165
+  s_f313f304041c9f::t_ea0a9f3339d378 104-114,118-121
+  s_f313f304041c9f::t_b6b909b1c37df2 115-117
+  s_f313f304041c9f::t_d84014f062cfa3 220-264
+  s_f313f304041c9f::t_efc95be0614bda 124-126
+  s_f313f304041c9f::t_28a17e8c0dde4c 265
+  s_f313f304041c9f::t_7ec70f17e1a902 157
+wasm_tools/api.py
+  s_f313f304041c9f::t_5bf5407597848b 17-21,537-577
+wasm_tools/models.py
+  s_f313f304041c9f::t_d33f373f5af392 241-243
+wasm_tools/visitor.py
+  s_f313f304041c9f::t_d33f373f5af392 264-268,270-272,275-286
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "43f08a3c6d7678360c1fff7bb57bdb911cf833f0",
+  "prompts": {},
+  "sessions": {
+    "s_f313f304041c9f": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "sess_02a3d826-3148-4c5e-a179-e38422bb7d90",
+        "model": "GLM-5.3"
+      },
+      "human_author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  }
+}
