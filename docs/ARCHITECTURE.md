@@ -17,7 +17,16 @@ This page describes how wasm-tools decodes WebAssembly binaries and why it is bu
 | `wasm_tools/api.py`       | Public functions, the JSON collector, and the analysis layer (detections, capabilities, profiles, findings, risk score).           |
 | `wasm_tools/component.py` | Component preamble detection and component-section parsing; nested core modules are re-entered through the same core parser.       |
 | `wasm_tools/strings.py`   | String extraction from data segments and secret/IoC screening. Pure post-processing.                                               |
-| `wasm_tools/graph.py`     | Call graph, import xrefs, and reachability. Pure post-processing.                                                                  |
+| `wasm_tools/graph.py`     | Call graph, import xrefs, and reachability; component graphs merge per-module graphs with `module_id` scoping and canon edges. Pure post-processing. |
+| `wasm_tools/customsections.py` | Tool-conventions custom section catalog: dylink.0, linking symbol table, branch hints, component-type, coredump. Pure decoders that degrade to None. |
+| `wasm_tools/features.py`  | Opcode histograms, n-grams, derived ratios, and the structural mining heuristic. Pure post-processing.                             |
+| `wasm_tools/obfuscation.py` | Obfuscation and packing signals with a composite score. Pure post-processing.                                                     |
+| `wasm_tools/provenance.py` | Toolchain and glue provenance with evidence-first detection. Pure post-processing.                                                |
+| `wasm_tools/demangle.py`  | Rust legacy and v0 crate-path demangling subset; anything unparseable returns the input unchanged.                                 |
+| `wasm_tools/cfg.py`       | Stack-aware basic-block CFG recovery per function. Pure post-processing over instruction lists.                                    |
+| `wasm_tools/dwarf.py`     | DWARF line-program state machine (DWARF 2-5) and function-level source mapping. Pure post-processing over retained payloads.       |
+| `wasm_tools/carve.py`     | Embedded wasm carving: magic scan, section-framing bounding, quick parse. Read-only and ceiling-bounded.                           |
+| `wasm_tools/wat.py`       | Flat WAT text emission with an unknown-opcode incomplete marker. Pure function of the report plus optional source bytes.           |
 | `wasm_tools/cli.py`       | Argument parsing, mode selection, text rendering for strings and call trees.                                                       |
 
 ## The two-pass pipeline

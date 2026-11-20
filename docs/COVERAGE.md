@@ -52,6 +52,10 @@ Status terms: `Tested` means implemented and covered by automated tests. `Partia
 | Unknown opcode resilience                                  | `5.3-binary.instructions.spectec` | Tested | `unknown_<prefix>_<opcode>` fallback with telemetry.                                                                                                             |
 | Wide arithmetic                                            | wide-arithmetic proposal          | Tested | `i64.add128`, `i64.sub128`, `i64.mul_wide_s/u`.                                                                                                                  |
 | Half-precision scalar memory                               | half-precision proposal           | Tested | `f32.load_f16`, `f32.store_f16`.                                                                                                                                 |
+| Half-precision vector arithmetic                           | half-precision proposal           | Tested | f16x8 binary arithmetic and conversions (`0x13d`-`0x14f` under the `0xFD` prefix); byte-level fixture, both assemblers still lack the text form.                 |
+| Branch hinting (custom section)                            | branch-hinting proposal           | Tested | `metadata.code.branch_hint` decoded per function and entry.                                                                                                      |
+| Multi-memory memargs                                       | multi-memory proposal             | Tested | Explicit memory-index flag (align bit 6) decoded so offsets parse correctly; `multi_memory.wasm` fixture.                                                        |
+| JS String Builtins namespace                               | JS String Builtins proposal       | Tested | `wasm:js-string` imports map to `js-strings` and `js.host` capabilities.                                                                                          |
 
 ## Interface and analysis coverage
 
@@ -65,10 +69,20 @@ Status terms: `Tested` means implemented and covered by automated tests. `Partia
 | Strings extraction and screening | Tested          | ASCII and UTF-16LE with provenance; secret/IoC signals.                                                              |
 | Call graph, xrefs, reachability  | Tested          | Labeled edges including approximations.                                                                              |
 | Toolchain fingerprint            | Tested          | `producers` and `target_features` custom sections.                                                                   |
-| Component Model binaries         | Tested          | Preamble detection, interface inventory, nested core modules.                                                        |
+| Component Model binaries         | Tested          | Preamble detection, interface inventory, nested core modules, WASI 0.3 canon built-ins and name attributes.           |
+| WIT package parsing              | Tested          | `ns:pkg/iface@version` grammar parsed into structures; implements attributes feed WASI detection.                     |
+| Toolchain provenance             | Tested          | `analysis.provenance` with evidence-first compiler and glue detection; pure-Python Rust demangling.                   |
+| Custom section catalog           | Tested          | dylink.0, linking symbol table, branch hints, component-type, coredump (see CUSTOM_SECTIONS.md).                      |
+| Opcode features and n-grams      | Tested          | `analysis.features` block, deterministic, budget-invariant.                                                           |
+| Obfuscation detection            | Tested          | WASM-OBF-010 with corpus false-positive guards.                                                                       |
+| Per-function CFG recovery        | Tested          | Opt-in basic-block graphs with a coverage invariant asserted across fixtures.                                         |
+| DWARF line tables (phase 1)      | Tested          | Function-level source mapping; hand-built v4 table plus corpus file-table validation.                                 |
+| WAT emission                     | Tested          | Round-trip harness over all core fixtures; golden files pin three.                                                    |
+| Embedded wasm carving            | Tested          | Container scans, base64 runs, ceilings, extraction.                                                                   |
 | Real-toolchain corpus regression | Tested          | Vendored clang/rustc binaries under `tests/fixtures/corpus/` with pinned decode and risk expectations.               |
 | Full spec validation             | Not implemented | Deliberate scope choice; validation belongs to runtimes and validators.                                              |
 | Text format (`.wat`) input       | Not implemented | Handled externally by WABT's `wat2wasm` for fixture builds; final-spec GC fixtures build with the Rust `wasm-tools`. |
+| Instruction-level DWARF mapping  | Not implemented | Phase 2: per-instruction source rows, split-DWARF sidecars, `sourceMappingURL`.                                       |
 
 ## Scope boundaries
 

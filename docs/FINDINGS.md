@@ -92,7 +92,8 @@ Instruction-set tokens (portability: they answer whether a given engine can run 
 | `isa.memory64`            | A declared or imported memory with 64-bit index type                                                                                                                                                                                                                      |
 | `isa.wide-arithmetic`     | `i64.add128`, `i64.sub128`, or `i64.mul_wide_*`                                                                                                                                                                                                                           |
 | `isa.exceptions`          | `try_table`, `throw`, or `throw_ref` (final exception encoding; `throw` shares its opcode with the legacy encoding, so a legacy-EH module can carry both tokens)                                                                                                          |
-| `isa.legacy-exceptions`   | `try`, `catch`, `rethrow`, `delegate`, or `catch_all` (pre-renumbering encoding still accepted by V8)                                                                                                                                                                     |
+| `isa.legacy-exceptions`   | `try`, `catch`, `rethrow`, `delegate`, or `catch_all` (pre-renumbering encoding still accepted by V8)                                                                                                                                                                      |
+| `isa.branch-hints`        | A `metadata.code.branch_hint` custom section is present (branch-hinting proposal)                                                                                                                         |
 
 An empty list means no host interaction was detected from imports alone. It does not mean the module is harmless; it means the decode surface is silent.
 
@@ -120,8 +121,12 @@ Findings are the actionable output: stable ids, severity, confidence, evidence, 
 | `WASM-JSCFG-006` | JS interface detected, plus indirect calls and table mutations that are reachable from JS-exposed entry points | high                                                                       | Op counts, exposed dynamic and mutating functions, `paths_from_export` |
 | `WASM-STR-007`   | String screening hits `aws_access_key`, `jwt_token`, `pem_private_key`, `mining_indicator`, `url`, or `domain` | high for key, token, PEM, or mining signals; medium for only url or domain | Signal counts and masked samples                                       |
 | `WASM-ISA-008`   | Any relaxed SIMD opcode is present                                                                             | low                                                                        | Relaxed opcode count and the opcode names                              |
+| `WASM-MIN-009`   | The module matches the structural cryptojacking profile: compute-bound (f64 arithmetic or SIMD), loop-dominated, call-free, branch-light, thin export surface | medium | The derived ratios, `mining_strings` corroboration, and the named thresholds |
+| `WASM-OBF-010`   | Obfuscation score 30 or more: control-flow-flattening dispatchers, packed high-entropy segments, duplicate-body herds, thunk swarms, and related signals | medium; high when two strong signals align | The score, signal list, dispatcher functions, packed segments, duplicate ratio |
 
-Confidence is `high` for CAP-001 (the evidence is the import list itself) and ISA-008 (the opcodes are decoded directly), and `medium` for the heuristic rules. Use the ids in tickets and detection rules; they are stable.
+Confidence is `high` for CAP-001 (the evidence is the import list itself) and ISA-008 (the opcodes are decoded directly), and `medium` for the heuristic rules, with two exceptions: MIN-009 stays at `low` unless the existing `mining_indicator` string signal corroborates the structural shape (numeric libraries can match it), and OBF-010 is `medium` by construction (the composite score gates firing). Use the ids in tickets and detection rules; they are stable.
+
+Two rules deserve their false-positive story told. MIN-009 matches on ratios, not exact sequences, because semantics-preserving rewrites defeat exact-pattern detectors (the Swamped study, ASE 2025, catalogued 22 perturbation classes); a decompressor or a math library can trip the structural bar, which is why the severity stays medium and the thresholds ship inside the finding's evidence. OBF-010's dispatcher gate requires a small function with a single wide `br_table` dispatching back into its own loop; real state machines (bz2's decompressor carries 41- and 57-target switches inside loops) share the shape but not the size profile, and the per-function metrics stay in `functions[].features` for analysts who want to look closer.
 
 DOS-003 matches lexically: the `memory.grow` must sit inside a loop body in the same function. A growth helper called from a loop does not fire it, so pair the finding with `profiles.memory.memory_grow_ops` and the [call graph](JSON_REFERENCE.md) when growth appears in a small callee.
 
@@ -136,6 +141,7 @@ The score is a bounded 0 to 100 sum. Capability weights:
 | `fs.io`             | 8      | `clock.high_res` | 4      |
 | `process.terminate` | 8      | `crypto.random`  | 2      |
 | `js.host`           | 6      | `host.global`    | 2      |
+| `js-strings`        | 6      | `host.tag`       | 2      |
 |                     |        | `host.tag`       | 2      |
 |                     |        | `host.logging`   | 2      |
 
@@ -147,7 +153,8 @@ Each active finding adds its own weight, and the total is clamped at 100. Findin
 | `WASM-DOS-003`     | 30     | `WASM-JSCFG-006` | 20                         |
 | `WASM-CFG-002`     | 25     | `WASM-STR-007`   | 20                         |
 | `WASM-LOOP-004`    | 15     | `WASM-ISA-008`   | 0 (compatibility advisory) |
-| unknown future ids | 5      |                  |                            |
+| unknown future ids | 5      | `WASM-MIN-009`   | 10 (structural advisory)   |
+|                    |        | `WASM-OBF-010`   | 15 (score-gated)           |
 
 Tier buckets: 0 is `none`, 1 to 39 `low`, 40 to 69 `medium`, 70 and above `high`. Treat the score as a queue priority. The real review decision still happens in the disassembly.
 

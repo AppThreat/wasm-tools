@@ -1,3 +1,62 @@
+# Migrations
+
+## Migrating to 2.2.0 (additive)
+
+Version 2.2.0 is a minor release: every change below is additive to the
+JSON report contract, and `report_contract` stays `wasm-tools/2`. Consumers
+that tolerate unknown keys need no changes.
+
+New report keys and analysis blocks:
+
+- Top-level: `report_contract`, and the custom-section catalog keys that
+  appear only when the matching section exists (`dylink`, `linking`,
+  `branch_hints`, `component_type`, `coredump`), plus `truncation` when
+  instruction budgets applied.
+- Functions: `features` (per-function structural features including
+  `body_hash`), `local_decls`, optional `demangled_name`, optional `source`
+  (DWARF phase 1), optional `instructions_truncated`/`instructions_kept`
+  under budgets, optional `instructions_omitted` under
+  `include_instructions=False`, and opt-in `cfg` basic-block graphs.
+- Instructions: `v128.const`, `v128.shuffle`, typed `select`, heap-type
+  immediates, `br_on_cast`, `try_table` catch clauses, and `br_table`
+  target lists are now recorded in JSON (the collector previously dropped
+  them). Multi-memory memargs decode the bit-6 memory-index flag, so
+  memarg immediates can lead with the memory index followed by alignment
+  and offset.
+- Analysis: `features` (opcode histogram, prefix counts, n-grams, derived
+  ratios), `dependency_hints`, `provenance`, `detections.obfuscation`, new
+  findings `WASM-MIN-009` and `WASM-OBF-010` (evidence keys registered),
+  and capability tokens `js-strings` and `isa.branch-hints`.
+- Components: parsed `wit` objects and `suggested_purl` on interface-shaped
+  imports/exports, `wit_packages`, `wit_summary`, `canonical_options.builtins`,
+  `canon_records`, `exported_functions`, module-scoped call graphs
+  (`module_id` on nodes, `from_module`/`to_module` on edges, `canon` edge
+  kind, per-module reachability), and WASI 0.3 decoding (async canon
+  built-ins, name attributes, composite value bounds).
+
+New library parameters (all keyword, all defaulted to preserve behavior):
+`max_instructions_per_function`, `instruction_budget`,
+`include_instructions`, `include_demangled`, `include_features`,
+`include_cfg`. New public helper `apply_instruction_budget`. New CLI flags:
+`--instruction-budget`, `--max-instructions-per-function`,
+`--no-instructions`, `--no-features`, `--no-demangle`, `--cfg`,
+`--section`, `--raw`, `--print-wat`, `--wat-out`, `--carve`,
+`--carve-full`, `--carve-decode`, `--extract`, `--version`, `-r`, and
+multi-file inputs (JSON Lines for `--json` with more than one input).
+
+Behavior changes worth knowing:
+
+- `--section` accepts numeric ids 0-13, canonical names, or custom section
+  names; an out-of-range id exits 2.
+- Dead code removed: `strings._ALWAYS_SIGNALS` and `graph._strip_internal`
+  had no callers.
+- `models.ObjdumpState` gains `branch_hints`, `dylink`, `linking`,
+  `component_type`, `coredump`, and `debug_payloads` fields.
+- `tests/fixtures/custom_name.wasm` (a zero-byte stale artifact) was
+  removed; the empty `tests/test_visitor.py` now carries real tests.
+
+---
+
 # Migrating from wasm-tools 1.x to 2.0.0
 
 Version 2.0.0 is a major release. It adds Component Model parsing, string/IoC

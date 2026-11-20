@@ -8,8 +8,13 @@
 - [JSON report reference](JSON_REFERENCE.md)
 - [Findings and signals](FINDINGS.md)
 - [Spec coverage matrix](COVERAGE.md)
+- [Toolchain provenance and demangling](PROVENANCE.md)
+- [Custom section catalog](CUSTOM_SECTIONS.md)
+- [WAT text emission](WAT.md)
 - **Triage**
 - [Analyst guide](ANALYST_GUIDE.md)
+- [DWARF source mapping](DWARF.md)
+- [Embedded wasm carving](CARVING.md)
 - **Tutorials**
 - [Lesson 1: First contact with an unknown module](LESSON1.md)
 - [Lesson 2: Reading the JSON report end to end](LESSON2.md)

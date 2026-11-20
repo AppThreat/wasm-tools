@@ -61,7 +61,8 @@ Component Details:
 | `imports`, `exports`                 | Component-level interface entries with kinds and type indices.                                         |
 | `interfaces`                         | Interface-qualified names, including package versions.                                                 |
 | `interface_packages`                 | Package names referenced by interfaces.                                                                |
-| `canonical_options`                  | Lift and lower counts plus the option set (for example `async`, `memory`, `realloc`, string encoding). |
+| `canonical_options`                  | Lift and lower counts plus the option set (for example `async`, `memory`, `realloc`, string encoding), and `builtins` counts for the 0.3 async-era canon operations. |
+| `wit_packages`                       | Parsed WIT package structure: namespace, package, version, interfaces, import/export directions, and the advisory `suggested_purl`. |
 | `core_modules`                       | Fully decoded reports for each embedded core module, same shape as a standalone report.                |
 
 Because consumers often want one flat view, the shared top-level lists (`sections`, `imports`, `functions`, `strings`, and others) are aggregations across all nested core modules, and every aggregated entry carries a `core_module` index. When indices collide across modules (function index 0 in two modules is two different functions), the `core_module` field disambiguates.
@@ -70,7 +71,7 @@ Because consumers often want one flat view, the shared top-level lists (`section
 
 WASI detection works the same way but reads interface names: `wasi:*@0.2.x` interfaces produce the `preview2` variant, `@0.3.x` and later produce `preview3`. Capability inference applies the same name-based mapping to interface names, so `wasi:filesystem/preopens@0.2.0` yields `fs.path`. The JS interface detection reads component import and export names for `wasm:*` builtins and glue patterns.
 
-The call graph is computed per core module, since function index spaces are per module. Indirect and typed call edges remain over-approximations, and cross-module edges through canon adapters are not reconstructed; treat each core module's graph as its own island.
+The call graph is module-scoped: every node carries `module_id` and every edge carries `from_module` and `to_module`, because flattened function indices collide across core modules. Canon lift and lower records contribute `canon` edges between core functions and synthetic `component:type<N>` nodes (provable from the canon section itself). Cross-module interface wiring needs instance and alias section decoding, which is a documented follow-up rather than a guess; per-module `reachability` blocks stay exact, and a `component_summary` carries the counts.
 
 ```text
 triage order for components
@@ -121,4 +122,4 @@ The `variants` output should print `["preview2"]`, and the core module's single 
 
 ## Known limits
 
-Component parsing covers the interface surface: preamble detection, import, export, canon, instance, and type sections, plus full decode of nested core modules. It does not reconstruct cross-module call edges, does not decode every exotic type grammar in component type sections, and per-core-module index spaces mean shared-list indices repeat across modules. These limits are recorded in the [coverage matrix](COVERAGE.md).
+Component parsing covers the interface surface: preamble detection, import, export, canon (including the WASI 0.3 async-era built-ins: task, subtask, stream, future, error-context, and thread operations, decoded into `canonical_options.builtins` counts), instance, and type sections, plus full decode of nested core modules. WASI 0.3.1 name attributes (`implements`, `version-suffix`, `external-id`) surface on import and export entries, and an `implements` attribute feeds interface listing and WASI variant detection. Interface names matching the WIT grammar are parsed into `wit` structures with an advisory purl suggestion. Remaining limits: cross-module call edges through canon adapters are not reconstructed (instance and alias sections are metadata-only), and not every exotic type grammar in component type sections is decoded. These limits are recorded in the [coverage matrix](COVERAGE.md).

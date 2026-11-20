@@ -15,6 +15,11 @@ The full documentation is published at [appthreat.github.io/wasm-tools](https://
 | [Format primer](./docs/FORMAT_PRIMER.md)          | What the bytes in a `.wasm` file mean            |
 | [JSON report reference](./docs/JSON_REFERENCE.md) | The machine-readable contract                    |
 | [Findings and signals](./docs/FINDINGS.md)        | Every analysis rule, threshold, and severity     |
+| [Provenance and demangling](./docs/PROVENANCE.md) | Toolchain detection and Rust symbol demangling   |
+| [Custom section catalog](./docs/CUSTOM_SECTIONS.md) | dylink, linking symbols, branch hints          |
+| [WAT emission](./docs/WAT.md)                     | Text emission and the round-trip harness         |
+| [DWARF source mapping](./docs/DWARF.md)           | Function-level file and line mapping             |
+| [Embedded wasm carving](./docs/CARVING.md)        | Finding wasm inside HTML, APKs, and containers   |
 | [Analyst guide](./docs/ANALYST_GUIDE.md)          | Triage recipes for unknown binaries              |
 | Lessons 1 to 10                                   | Hands-on tutorials against the repo fixtures     |
 | [Architecture](./docs/ARCHITECTURE.md)            | Parser internals and design decisions            |
