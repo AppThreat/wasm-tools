@@ -1,0 +1,27 @@
+wasm_tools/carve.py
+  s_f313f304041c9f::t_d842153e0c160f 1-53,60-63,65-69,83-258
+  s_f313f304041c9f::t_2a28602a2cd2d9 54-59,64,74-82
+  s_f313f304041c9f::t_4a2129ae251a93 70-73
+tests/test_carve.py
+  s_f313f304041c9f::t_2a28602a2cd2d9 97-98,107-108
+  s_f313f304041c9f::t_41cbf6bf65da14 1-96,99-106,109-162
+wasm_tools/cli.py
+  s_f313f304041c9f::t_4dcb9ea3b360a1 408-428,557-601
+  s_f313f304041c9f::t_25a11d835ef12d 602-603
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "f7e4fb496872b740d7db1e550602c11a02f04eff",
+  "prompts": {},
+  "sessions": {
+    "s_f313f304041c9f": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "sess_02a3d826-3148-4c5e-a179-e38422bb7d90",
+        "model": "GLM-5.3"
+      },
+      "human_author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  }
+}
