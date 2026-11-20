@@ -51,8 +51,7 @@ report entries, call graph nodes, and the analysis layer alike.
 
 ## What is deliberately not decoded
 
-Relocation subsections record counts only; comdat groups record names and
-membership; the embedded `component-type` WIT binary is summarized, not
+Relocation subsections and comdat groups record counts only; the embedded `component-type` WIT binary is summarized, not
 decoded. Payloads the report retains (DWARF sections) are capped: the
 retention budget is 8 MB per module, and retention past the cap stops with
 a note rather than ballooning the process.

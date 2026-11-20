@@ -22,7 +22,8 @@ Decoded formats, verified against the tool-conventions documents:
 - ``metadata.code.branch_hint`` (CodeMetadata.md, branch-hinting proposal):
   vec(function) where function ::= funcidx:u32 vec(instance) and instance
   ::= funcpos:u32 size:0x01 hint:0x00(unlikely)|0x01(likely).
-- ``component-type``: recorded by name, version, and payload length; the
+- ``component-type`` and ``component-type:*``: recorded by payload length and
+  the embedded component's version; the
   embedded WIT binary type grammar is out of scope here.
 - ``core`` (Coredump.md): recorded by name only.
 """
@@ -73,6 +74,7 @@ SYM_ABSOLUTE = 0x200
 
 DEFAULT_MAX_LINKING_SYMBOLS = 500
 DEFAULT_MAX_BRANCH_HINT_FUNCTIONS = 500
+DEFAULT_MAX_BRANCH_HINTS_PER_FUNCTION = 1000
 
 
 class _CustomParseError(Exception):
@@ -245,17 +247,14 @@ def parse_linking(payload: bytes) -> Optional[dict[str, Any]]:
                     }
                     if kind == SYMTAB_DATA:
                         entry["name"] = r.read_string()
-                        if flags & SYM_UNDEFINED or flags & SYM_ABSOLUTE:
-                            pass
-                        else:
-                            # Defined, non-absolute data symbols carry an
-                            # optional segment index, offset, and size.
-                            if r.offset < sub_end:
-                                entry["segment_index"] = r.read_u32()
-                                if r.offset < sub_end:
-                                    entry["offset"] = r.read_u32()
-                                    if r.offset < sub_end:
-                                        entry["size"] = r.read_u32()
+                        if not flags & SYM_UNDEFINED:
+                            # Every defined data symbol, absolute ones
+                            # included, carries its segment index, offset
+                            # and size (LLVM's WasmObjectFile reads all
+                            # three whenever the symbol is defined).
+                            entry["segment_index"] = r.read_u32()
+                            entry["offset"] = r.read_u32()
+                            entry["size"] = r.read_u32()
                     elif kind == SYMTAB_SECTION:
                         entry["section"] = r.read_u32()
                     else:
@@ -268,10 +267,14 @@ def parse_linking(payload: bytes) -> Optional[dict[str, Any]]:
                             or (flags & SYM_EXPLICIT_NAME)
                         ):
                             entry["name"] = r.read_string()
-                    symbols.append(entry)
+                    # Every entry is decoded to stay in step with the
+                    # payload, but only the first ones are kept, so a huge
+                    # table costs time, not memory.
+                    if len(symbols) < DEFAULT_MAX_LINKING_SYMBOLS:
+                        symbols.append(entry)
                 info["symbol_count"] = count
-                info["symbols"] = symbols[:DEFAULT_MAX_LINKING_SYMBOLS]
-                info["symbols_truncated"] = count > len(info["symbols"])
+                info["symbols"] = symbols
+                info["symbols_truncated"] = count > len(symbols)
             elif sub_type == LINKING_SEGMENT_INFO:
                 seg_names = []
                 for _ in range(r.read_u32()):
@@ -282,31 +285,23 @@ def parse_linking(payload: bytes) -> Optional[dict[str, Any]]:
                 info["segment_names"] = seg_names
             elif sub_type == LINKING_INIT_FUNCS:
                 entries = []
-                for _ in range(r.read_u32()):
+                init_count = r.read_u32()
+                for _ in range(init_count):
                     priority = r.read_u32()
                     symbol_index = r.read_u32()
-                    entries.append({"priority": priority, "symbol": symbol_index})
-                info["init_func_count"] = len(entries)
-                info["init_funcs"] = entries[:DEFAULT_MAX_LINKING_SYMBOLS]
+                    if len(entries) < DEFAULT_MAX_LINKING_SYMBOLS:
+                        entries.append({"priority": priority, "symbol": symbol_index})
+                info["init_func_count"] = init_count
+                info["init_funcs"] = entries
             elif sub_type == LINKING_COMDAT_INFO:
-                comdats = []
-                for _ in range(r.read_u32()):
-                    comdat_name = r.read_string()
+                comdat_count = r.read_u32()
+                for _ in range(comdat_count):
+                    r.read_string()  # comdat name
                     r.read_u32()  # flags (must be zero)
-                    members = []
                     for _ in range(r.read_u32()):
-                        member_kind = r.read_u8()
-                        member_index = r.read_u32()
-                        members.append(
-                            {
-                                "kind": SYMBOL_KIND_NAMES.get(
-                                    member_kind, f"kind{member_kind}"
-                                ),
-                                "index": member_index,
-                            }
-                        )
-                    comdats.append({"name": comdat_name, "symbols": members})
-                info["comdat_count"] = len(comdats)
+                        r.read_u8()  # member kind
+                        r.read_u32()  # member index
+                info["comdat_count"] = comdat_count
             elif sub_type == LINKING_TARGET_ARCH:
                 info["target_arch"] = r.read_string()
             r.offset = sub_end
@@ -340,15 +335,20 @@ def parse_branch_hints(payload: bytes) -> Optional[dict[str, Any]]:
                 value = r.read_u8()
                 if value not in (0x00, 0x01):
                     raise _CustomParseError(f"unknown hint value {value:#x}")
-                instances.append(
-                    {"offset": offset, "hint": "unlikely" if value == 0x00 else "likely"}
-                )
+                if (
+                    len(functions) < DEFAULT_MAX_BRANCH_HINT_FUNCTIONS
+                    and len(instances) < DEFAULT_MAX_BRANCH_HINTS_PER_FUNCTION
+                ):
+                    instances.append(
+                        {"offset": offset, "hint": "unlikely" if value == 0x00 else "likely"}
+                    )
                 hint_count += 1
-            functions.append({"function": func_index, "hints": instances})
+            if len(functions) < DEFAULT_MAX_BRANCH_HINT_FUNCTIONS:
+                functions.append({"function": func_index, "hints": instances})
         return {
             "hinted_function_count": function_count,
             "hint_count": hint_count,
-            "functions": functions[:DEFAULT_MAX_BRANCH_HINT_FUNCTIONS],
+            "functions": functions,
             "functions_truncated": function_count
             > min(function_count, DEFAULT_MAX_BRANCH_HINT_FUNCTIONS),
         }
@@ -357,21 +357,23 @@ def parse_branch_hints(payload: bytes) -> Optional[dict[str, Any]]:
 
 
 def parse_component_type(payload: bytes) -> Optional[dict[str, Any]]:
-    """Summarize the ``component-type`` custom section without decoding WIT.
+    """Summarize a ``component-type`` custom section without decoding WIT.
 
-    The embedded binary encodes a full component type (the input to
-    ``wasm-tools component new``); decoding that grammar is out of scope,
-    so this records the section's size for the analyst. A leading LEB is
-    read best-effort as the version when the payload is non-empty.
+    wit-bindgen names these sections ``component-type`` or
+    ``component-type:<suffix>``, and each carries a complete component
+    binary encoding the world the module was generated for (the input to
+    ``wasm-tools component new``). Decoding that type grammar is out of
+    scope, so the summary records the payload size and, when the payload
+    starts with a component preamble, its component version.
     """
     if not payload:
         return None
-    r = _Reader(payload)
-    try:
-        version = r.read_u32()
-    except _CustomParseError:
-        version = None
-    return {"payload_size": len(payload), "version": version}
+    summary: dict[str, Any] = {"payload_size": len(payload), "version": None}
+    if len(payload) >= 8 and payload[:4] == b"\x00asm":
+        layer = payload[6] | (payload[7] << 8)
+        if layer == 1:
+            summary["version"] = payload[4] | (payload[5] << 8)
+    return summary
 
 
 def name_precedence_names(

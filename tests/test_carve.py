@@ -93,6 +93,19 @@ def test_carve_magic_storm_returns_quickly_and_empty():
     assert report["blob_count"] == 0
 
 
+def test_carve_section_ceiling_storm_stays_linear():
+    # One module whose custom sections each hold another valid preamble:
+    # the walk hits the section ceiling, and resuming at the next magic
+    # used to re-walk the same framing (1 MB took over 30 seconds).
+    import time
+
+    magic = b"\x00asm\x01\x00\x00\x00"
+    data = magic + (b"\x00\x08" + magic) * 103_000
+    started = time.monotonic()
+    find_wasm_blobs(data)
+    assert time.monotonic() - started < 5
+
+
 def test_carve_base64_runs():
     # The 1024-byte run floor needs a real module; simple_add is too small.
     blob = _fixture_bytes("unreachable.wasm")

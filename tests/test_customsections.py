@@ -4,6 +4,8 @@ branch hints, component-type, coredump)."""
 
 import os
 
+import pytest
+
 from wasm_tools.api import parse_wasm_bytes
 from wasm_tools.customsections import (
     parse_branch_hints,
@@ -155,6 +157,32 @@ def test_linking_data_symbol_with_segment_fields():
     assert info["symbols"][0]["size"] == 32
 
 
+def test_absolute_data_symbol_keeps_the_table_in_step():
+    # A defined absolute data symbol (flags 0x200) still carries segment,
+    # offset and size; skipping them misframed every later symbol.
+    absolute = bytes([1]) + _leb(0x200) + _name("a") + _leb(0) + _leb(4) + _leb(8)
+    func = bytes([0]) + _leb(0x00) + _leb(1) + _name("foo")
+    info = parse_linking(_leb(2) + _sub(8, _leb(2) + absolute + func))
+    assert info["symbols"][0]["absolute"] is True
+    assert info["symbols"][0]["size"] == 8
+    assert (info["symbols"][1]["kind"], info["symbols"][1]["name"], info["symbols"][1]["index"]) == (
+        "func",
+        "foo",
+        1,
+    )
+
+
+def test_huge_symbol_table_keeps_only_the_capped_entries():
+    from wasm_tools.customsections import DEFAULT_MAX_LINKING_SYMBOLS
+
+    count = DEFAULT_MAX_LINKING_SYMBOLS * 20
+    symbol = bytes([1]) + _leb(0x10) + _name("x")
+    info = parse_linking(_leb(2) + _sub(8, _leb(count) + symbol * count))
+    assert info["symbol_count"] == count
+    assert len(info["symbols"]) == DEFAULT_MAX_LINKING_SYMBOLS
+    assert info["symbols_truncated"] is True
+
+
 def test_linking_segment_info_and_target_arch():
     payload = (
         _leb(2)
@@ -227,11 +255,14 @@ def test_em_js_segment_counted_from_segment_info():
 # ─── component-type and coredump ─────────────────────────────────────────────
 
 
-def test_component_type_section_summarized():
-    payload = _leb(1) + b"\x00\x00\x00"
-    module = _core_module(_custom_section("component-type", payload))
+@pytest.mark.parametrize("name", ["component-type", "component-type:wit-bindgen:0.41.0:a:b:w"])
+def test_component_type_section_summarized(name):
+    # The payload is a component binary (version 0x0d, layer 1); wit-bindgen
+    # suffixes the section name.
+    payload = b"\x00asm\x0d\x00\x01\x00" + b"\x00" * 4
+    module = _core_module(_custom_section(name, payload))
     report = parse_wasm_bytes(module, "ct.wasm")
-    assert report["component_type"]["version"] == 1
+    assert report["component_type"]["version"] == 0x0D
     assert report["component_type"]["payload_size"] == len(payload)
 
 

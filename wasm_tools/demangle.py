@@ -27,6 +27,13 @@ from __future__ import annotations
 import re
 from typing import Optional
 
+# str.isdigit accepts characters such as "²" that int() rejects, so the
+# length prefixes are matched against the ASCII digits only.
+_ASCII_DIGITS = frozenset("0123456789")
+
+#: Deepest v0 path nesting rendered; deeper names are returned unchanged.
+_MAX_V0_DEPTH = 64
+
 # Legacy Rust hash segment: 17 chars, "h" plus 16 hex digits.
 _LEGACY_HASH_RE = re.compile(r"^h[0-9a-f]{16}$")
 
@@ -38,7 +45,7 @@ def _iter_legacy_segments(body: str) -> Optional[list[str]]:
     size = len(body)
     while pos < size:
         digits = ""
-        while pos < size and body[pos].isdigit():
+        while pos < size and body[pos] in _ASCII_DIGITS:
             digits += body[pos]
             pos += 1
         if not digits:
@@ -88,7 +95,7 @@ def _parse_v0_identifier(text: str) -> tuple[str, int]:
     if pos < len(text) and text[pos] == "u":
         raise ValueError("punycode identifiers unsupported")
     digits = ""
-    while pos < len(text) and text[pos].isdigit():
+    while pos < len(text) and text[pos] in _ASCII_DIGITS:
         digits += text[pos]
         pos += 1
     if not digits:
@@ -120,7 +127,7 @@ def _base62_decode(text: str) -> Optional[int]:
     return None  # base-62 numbers terminate with the underscore
 
 
-def _parse_v0_path(body: str, pos: int) -> tuple[list[str], int]:
+def _parse_v0_path(body: str, pos: int, depth: int = 0) -> tuple[list[str], int]:
     """Parse one v0 path; return (rendered components, end position).
 
     Supported: ``C <identifier>`` crate roots and ``N <ns> <path>
@@ -130,6 +137,8 @@ def _parse_v0_path(body: str, pos: int) -> tuple[list[str], int]:
     """
     if pos >= len(body):
         raise ValueError("truncated v0 path")
+    if depth >= _MAX_V0_DEPTH:
+        raise ValueError("v0 path nested too deeply")
     char = body[pos]
     if char == "C":
         ident, end = _parse_v0_identifier(body[pos + 1 :])
@@ -138,7 +147,7 @@ def _parse_v0_path(body: str, pos: int) -> tuple[list[str], int]:
         if pos + 1 >= len(body):
             raise ValueError("truncated namespace tag")
         tag = body[pos + 1]
-        sub_parts, pos2 = _parse_v0_path(body, pos + 2)
+        sub_parts, pos2 = _parse_v0_path(body, pos + 2, depth + 1)
         ident, pos3 = _parse_v0_identifier(body[pos2:])
         if tag == "C":
             rendered = "{closure#" + (ident or "0") + "}"

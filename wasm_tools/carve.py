@@ -50,7 +50,11 @@ _BASE64_MIN_DECODED = 1024
 
 
 class _BlobWalkError(Exception):
-    pass
+    """A blob walk hit a ceiling; ``offset`` is how far the walk got."""
+
+    def __init__(self, message: str, offset: int) -> None:
+        super().__init__(message)
+        self.offset = offset
 
 
 def _bound_blob(data: bytes, start: int) -> tuple[int, bool]:
@@ -71,7 +75,7 @@ def _bound_blob(data: bytes, start: int) -> tuple[int, bool]:
     while offset < size:
         sections += 1
         if sections > _MAX_SECTIONS_PER_BLOB:
-            raise _BlobWalkError("section count ceiling exceeded")
+            raise _BlobWalkError("section count ceiling exceeded", offset)
         section_id = data[offset]
         if data[offset : offset + 4] == WASM_MAGIC:
             # The next embedded module starts here (a bare 0x00 would
@@ -148,10 +152,16 @@ def find_wasm_blobs(
             continue
         try:
             end, truncated = _bound_blob(data, hit)
-        except _BlobWalkError:
-            # A crafted framing storm: skip this magic and keep scanning.
+        except _BlobWalkError as exc:
+            # A crafted framing storm: skip the framing already walked, so
+            # a magic inside it is not walked again (which made a storm of
+            # magics quadratic), and keep scanning.
+            cursor = max(cursor, exc.offset)
             continue
         if end <= hit or hit + min_size > end:
+            # Too small to report; a magic inside the walked framing is part
+            # of this candidate, so the scan resumes past it.
+            cursor = max(cursor, end)
             continue
         blob_size = end - hit
         if blob_size > ceiling:

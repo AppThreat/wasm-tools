@@ -34,14 +34,14 @@ def test_bz2_provenance_clang_via_producers():
     assert provenance["runtime_target"]["name"] in {"wasi-preview1", "unknown"}
 
 
-def test_erc20_provenance_reports_something_or_notes():
+def test_erc20_provenance_claims_nothing_without_evidence():
     report = parse_wasm_bytes(_fixture_bytes("corpus/erc20.wasm"), "erc20.wasm")
     provenance = _provenance(report)
-    # The Soroban fixtures carry no producers; provenance must be honest
-    # about it rather than inventing a compiler claim.
-    claimed = {c["name"] for c in provenance["compilers"]}
-    if not claimed:
-        assert provenance["runtime_target"]["name"] in {"unknown", "wasi-preview1"}
+    # The Soroban fixture carries no producers, DWARF, or runtime imports:
+    # provenance must not invent a compiler, glue layer, or target.
+    assert provenance["compilers"] == []
+    assert provenance["glue"] == []
+    assert provenance["runtime_target"]["name"] == "unknown"
 
 
 def test_wasm_bindgen_glue_detection():
@@ -102,14 +102,70 @@ def test_fastly_platform_detection():
     assert "fastly-compute" in hints
 
 
-def test_provenance_never_claims_versions_without_evidence():
-    report = parse_wasm_bytes(_fixture_bytes("simple_add.wasm"), "s.wasm")
-    provenance = _provenance(report)
-    for compiler in provenance["compilers"] + provenance["glue"]:
-        if compiler["confidence"] == "medium":
-            assert compiler["version"] == "", (
-                "medium-confidence claims never state a version"
-            )
+def test_provenance_versions_always_come_from_producers_or_dwarf():
+    # Every fixture in the suite: a claim that states a version must cite
+    # the producers section or DWARF as its evidence.
+    fixtures = [
+        os.path.join(root, name)
+        for root, _dirs, files in os.walk(FIXTURES_DIR)
+        for name in files
+        if name.endswith(".wasm")
+    ]
+    checked = 0
+    for path in fixtures:
+        report = parse_wasm_bytes(open(path, "rb").read(), os.path.basename(path))
+        provenance = report["analysis"].get("provenance")
+        if not provenance:
+            continue
+        for claim in provenance["compilers"] + provenance["glue"]:
+            if claim["version"]:
+                checked += 1
+                assert any(
+                    "producers" in e or "DWARF" in e for e in claim["evidence"]
+                ), (path, claim)
+    # Positive control: bz2's clang claim carries a version.
+    assert checked >= 1
+
+
+def _bare_provenance(**overrides):
+    inputs = {
+        "toolchain": {},
+        "imports": [],
+        "exports": [],
+        "function_names": [],
+        "strings": [],
+        "debug_str": None,
+        "dylink": None,
+        "has_name_section": False,
+    }
+    inputs.update(overrides)
+    return build_provenance(**inputs)
+
+
+def test_a_small_wasi_command_is_not_claimed_as_go():
+    # fd_write and proc_exit alone fit any small C or Rust WASI command.
+    imports = [
+        {"module": "wasi_snapshot_preview1", "name": "fd_write"},
+        {"module": "wasi_snapshot_preview1", "name": "proc_exit"},
+    ]
+    assert _bare_provenance(imports=imports)["compilers"] == []
+    with_runtime = _bare_provenance(imports=imports, strings=["runtime.main"])
+    assert [c["name"] for c in with_runtime["compilers"]] == ["go"]
+
+
+def test_binaryen_alone_does_not_imply_a_browser_target():
+    toolchain = {"processed_by": [{"name": "Binaryen", "version": "123"}]}
+    provenance = _bare_provenance(toolchain=toolchain)
+    assert [g["name"] for g in provenance["glue"]] == ["Binaryen"]
+    assert provenance["runtime_target"]["name"] == "unknown"
+    assert provenance["platform"]["name"] == "none"
+
+
+def test_zig_needs_a_zig_producer_string():
+    mention = _bare_provenance(debug_str=b"how to build with zig \x00clang version 18\x00")
+    assert "zig" not in [c["name"] for c in mention["compilers"]]
+    producer = _bare_provenance(debug_str=b"zig 0.13.0\x00")
+    assert "zig" in [c["name"] for c in producer["compilers"]]
 
 
 # ─── demangling ──────────────────────────────────────────────────────────────
@@ -155,8 +211,42 @@ def test_demangle_never_raises_on_adversarial_input():
         "_RNs" + "9" * 300,
         "_ZN99999999999999x",
         "_R" + "C" + "s" * 50,
+        "_ZN\u00b2E",
+        "_R" + "Nv" * 2000 + "C1a",
     ):
         assert demangle(name) == name
+
+
+def test_adversarial_export_names_do_not_break_the_report():
+    # "_ZN²E" made int() raise (isdigit accepts "²") and a 2000-deep v0
+    # path hit the recursion limit, both out of parse_wasm_bytes.
+    def _leb(n):
+        out = bytearray()
+        while True:
+            b = n & 0x7F
+            n >>= 7
+            out.append(b | 0x80 if n else b)
+            if not n:
+                return bytes(out)
+
+    def _section(sid, payload):
+        return bytes([sid]) + _leb(len(payload)) + payload
+
+    names = ["_ZN\u00b2E", "_R" + "Nv" * 2000 + "C1a"]
+    exports = _leb(len(names))
+    for name in names:
+        raw = name.encode()
+        exports += _leb(len(raw)) + raw + b"\x00" + _leb(0)
+    module = (
+        b"\x00asm\x01\x00\x00\x00"
+        + _section(1, _leb(1) + b"\x60\x00\x00")
+        + _section(3, _leb(1) + _leb(0))
+        + _section(7, exports)
+        + _section(10, _leb(1) + _leb(2) + b"\x00\x0b")
+    )
+    report = parse_wasm_bytes(module, "names.wasm")
+    assert report["errors"] == []
+    assert [e["name"] for e in report["exports"]] == names
 
 
 def test_demangle_batch_maps_only_changed_names():

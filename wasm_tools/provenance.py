@@ -21,7 +21,11 @@ changes findings or risk scores.
 
 from __future__ import annotations
 
+import re
 from typing import Any, Optional
+
+# A DWARF producer string of a zig build: "zig 0.13.0" and the like.
+_ZIG_PRODUCER_RE = re.compile(r"^zig \d+\.\d+")
 
 _WASI_IMPORT_SUBSET_GO = {
     "clock_time_get",
@@ -164,17 +168,20 @@ def build_provenance(
         if str(imp.get("module", "")) == "wasi_snapshot_preview1"
     }
     go_strings = any(s.startswith(("runtime.", "go:")) for s in module_strings)
+    # The Go wasip1 import subset alone also fits any small C or Rust WASI
+    # command that only writes and exits, so Go runtime strings are required
+    # as well.
     if (
         not processed_by
         and not has_name_section
         and wasi_imports
         and wasi_imports.issubset(_WASI_IMPORT_SUBSET_GO)
+        and go_strings
     ):
         evidence = [
             f"{len(wasi_imports)} wasi_snapshot_preview1 imports (Go wasip1 subset)",
+            "Go runtime strings in data segments",
         ]
-        if go_strings:
-            evidence.append("Go runtime strings in data segments")
         add_compiler("go", "", "medium", evidence)
         tinygo_strings = any("tinygo" in s.lower() for s in module_strings)
         if tinygo_strings:
@@ -197,13 +204,16 @@ def build_provenance(
 
     # DWARF producer strings: .debug_str carries "clang version ...", and
     # zig builds leave "zig <version>" there too.
+    # Only whole NUL-terminated strings count as producer strings, so a
+    # source string that merely mentions "zig " does not.
     if debug_str:
-        text = debug_str[:65536].decode("utf-8", errors="replace")
-        lower = text.lower()
-        if "clang version" in lower and "clang" not in {c["name"] for c in compilers}:
+        strings = debug_str[:65536].decode("utf-8", errors="replace").split("\x00")
+        if any("clang version" in text.lower() for text in strings) and "clang" not in {
+            c["name"] for c in compilers
+        }:
             add_compiler("clang", "", "high", ["DWARF .debug_str 'clang version' string"])
-        if "zig " in lower:
-            add_compiler("zig", "", "high", ["DWARF .debug_str 'zig' producer string"])
+        if any(_ZIG_PRODUCER_RE.match(text) for text in strings):
+            add_compiler("zig", "", "high", ["DWARF .debug_str 'zig <version>' producer string"])
 
     # Name-section mangling shapes.
     kotlin_names = [n for n in function_names if "kotlin" in n.lower()]
@@ -219,8 +229,11 @@ def build_provenance(
     # Bare env imports are ubiquitous (abort hooks, allocator glue), so the
     # browser-js target requires the dedicated JS namespaces or an identified
     # glue framework rather than any env import.
+    # Binaryen is an optimizer, not a JS glue layer, so it never implies a
+    # browser target on its own.
     has_js_glue = bool(
-        {m for m in import_modules if m in {"wbg", "js"}} or glue
+        {m for m in import_modules if m in {"wbg", "js"}}
+        or any(entry["name"] != "Binaryen" for entry in glue)
     )
     if has_wasi_p2:
         runtime_target = {"name": "wasi-preview2+", "confidence": "high"}
