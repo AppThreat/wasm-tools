@@ -13,6 +13,7 @@ from .component import (
     suggested_wit_purl,
     wasi_variants_from_interfaces,
 )
+from .cfg import build_function_cfg
 from .customsections import name_precedence_names
 from .features import build_features, evaluate_miner_heuristic
 from .obfuscation import build_obfuscation_detection
@@ -294,6 +295,7 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
         include_instructions: bool = True,
         include_demangled: bool = True,
         include_features: bool = True,
+        include_cfg: bool = False,
     ) -> dict[str, Any]:
         """Build the final JSON-ready report for this module.
 
@@ -527,6 +529,11 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
             instruction_budget,
             max_instructions_per_function,
         )
+        if include_cfg and include_instructions:
+            # CFGs need the instruction streams; with instruction emission
+            # off the block structure is not recoverable from the report.
+            for fn in functions:
+                fn["cfg"] = build_function_cfg(fn.get("instructions") or [])
         if not include_instructions:
             _strip_instruction_streams(functions)
 
@@ -2272,6 +2279,7 @@ def _run_core_pipeline(
     include_instructions: bool = True,
     include_demangled: bool = True,
     include_features: bool = True,
+    include_cfg: bool = False,
 ) -> dict[str, Any]:
     """Run the two-pass core-module pipeline and return its full report."""
     options = ObjdumpOptions(mode=ObjdumpMode.RAW_DATA, filename=filename)
@@ -2292,6 +2300,7 @@ def _run_core_pipeline(
         include_instructions=include_instructions,
         include_demangled=include_demangled,
         include_features=include_features,
+        include_cfg=include_cfg,
     )
 
 
@@ -2337,6 +2346,7 @@ def _build_component_report(
     include_instructions: bool = True,
     include_demangled: bool = True,
     include_features: bool = True,
+    include_cfg: bool = False,
 ) -> dict[str, Any]:
     """Build a full triage report for a component-model binary.
 
@@ -2359,6 +2369,7 @@ def _build_component_report(
             include_instructions=include_instructions,
             include_demangled=include_demangled,
             include_features=include_features,
+            include_cfg=include_cfg,
         ),
     )
     sections = component.pop("sections", [])
@@ -2583,6 +2594,7 @@ def parse_wasm_bytes(
     include_instructions: bool = True,
     include_demangled: bool = True,
     include_features: bool = True,
+    include_cfg: bool = False,
 ) -> dict[str, Any]:
     """Parse raw wasm bytes (core module or component) into a report.
 
@@ -2610,6 +2622,7 @@ def parse_wasm_bytes(
             include_instructions=include_instructions,
             include_demangled=include_demangled,
             include_features=include_features,
+            include_cfg=include_cfg,
         )
     return _run_core_pipeline(
         data,
@@ -2622,6 +2635,7 @@ def parse_wasm_bytes(
         include_instructions=include_instructions,
         include_demangled=include_demangled,
         include_features=include_features,
+        include_cfg=include_cfg,
     )
 
 
@@ -2635,6 +2649,7 @@ def parse_wasm_file(
     include_instructions: bool = True,
     include_demangled: bool = True,
     include_features: bool = True,
+    include_cfg: bool = False,
 ) -> dict[str, Any]:
     """Read and parse a wasm file path into a structured report dictionary."""
     try:
@@ -2650,6 +2665,7 @@ def parse_wasm_file(
                 include_instructions=include_instructions,
                 include_demangled=include_demangled,
                 include_features=include_features,
+                include_cfg=include_cfg,
             )
     except OSError as exc:
         return {
@@ -2750,6 +2766,7 @@ def parse_wasm_bytes_json(
     include_instructions: bool = True,
     include_demangled: bool = True,
     include_features: bool = True,
+    include_cfg: bool = False,
 ) -> str:
     """Parse wasm bytes and serialize the structured report as JSON text."""
     report = parse_wasm_bytes(
@@ -2763,6 +2780,7 @@ def parse_wasm_bytes_json(
         include_instructions=include_instructions,
         include_demangled=include_demangled,
         include_features=include_features,
+        include_cfg=include_cfg,
     )
     return json.dumps(report, ensure_ascii=False, indent=indent)
 
@@ -2778,6 +2796,7 @@ def parse_wasm_file_json(
     include_instructions: bool = True,
     include_demangled: bool = True,
     include_features: bool = True,
+    include_cfg: bool = False,
 ) -> str:
     """Parse a wasm file and serialize the structured report as JSON text."""
     report = parse_wasm_file(
@@ -2790,5 +2809,6 @@ def parse_wasm_file_json(
         include_instructions=include_instructions,
         include_demangled=include_demangled,
         include_features=include_features,
+        include_cfg=include_cfg,
     )
     return json.dumps(report, ensure_ascii=False, indent=indent)

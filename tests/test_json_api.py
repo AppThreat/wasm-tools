@@ -1464,3 +1464,134 @@ def test_data_segments_carry_entropy():
     assert "entropy" in segment
     # Repeated printable bytes: low entropy, nowhere near packed.
     assert segment["entropy"] < 4.0
+
+
+# ─── Basic-block CFG recovery (P12) ──────────────────────────────────────────
+
+
+def _cfg_of(name: str, fn_index: int = 0) -> dict:
+    report = parse_wasm_bytes(_fixture_bytes(name), name, include_cfg=True)
+    return report["functions"][fn_index]["cfg"]
+
+
+def test_cfg_opt_in_only():
+    raw = _fixture_bytes("simple_add.wasm")
+    default = parse_wasm_bytes(raw, "s.wasm")
+    assert all("cfg" not in fn for fn in default["functions"])
+    with_cfg = parse_wasm_bytes(raw, "s.wasm", include_cfg=True)
+    assert all("cfg" in fn for fn in with_cfg["functions"])
+
+
+def test_cfg_straight_line_function():
+    # simple_add: local.get, local.get, i32.const?, i32.add, end — a single
+    # block, no loops, no unreachable blocks.
+    cfg = _cfg_of("simple_add.wasm")
+    assert cfg["block_count"] == 1
+    assert cfg["blocks"][0]["successors"] == []
+    assert cfg["loop_headers"] == []
+    assert cfg["unreachable_blocks"] == []
+    assert cfg["incomplete"] is False
+
+
+def test_cfg_branching_function():
+    # complex_flow's second function carries the branchy control flow:
+    # blocks, a loop, and edges; the trivial first function is one block.
+    report = parse_wasm_bytes(
+        _fixture_bytes("complex_flow.wasm"), "cf.wasm", include_cfg=True
+    )
+    cfgs = [fn["cfg"] for fn in report["functions"]]
+    assert cfgs[0]["block_count"] == 1
+    branching = cfgs[1]
+    assert branching["block_count"] > 1
+    assert branching["edge_count"] >= branching["block_count"] - 1
+    assert branching["loop_headers"], "the loop registers a header"
+
+
+def test_cfg_coverage_invariant_across_fixtures():
+    for name in (
+        "control_flow.wasm",
+        "complex_flow.wasm",
+        "labels_control.wasm",
+        "call_graph.wasm",
+        "call_refs.wasm",
+        "exceptions_basic.wasm",
+        "dos_growth_loop.wasm",
+        "control_flow_flattened.wasm",
+    ):
+        report = parse_wasm_bytes(_fixture_bytes(name), name, include_cfg=True)
+        for fn in report["functions"]:
+            cfg = fn["cfg"]
+            total = sum(b["instructions"] for b in cfg["blocks"])
+            assert total == fn["instruction_count"], (
+                f"{name} fn[{fn['index']}]: blocks must cover every instruction"
+            )
+            block_ids = [b["id"] for b in cfg["blocks"]]
+            assert block_ids == list(range(cfg["block_count"])), (
+                "block ids are dense and ordered"
+            )
+
+
+def test_cfg_loop_detection():
+    growing = parse_wasm_bytes(
+        _fixture_bytes("dos_growth_loop.wasm"), "g.wasm", include_cfg=True
+    )
+    cfgs = [fn["cfg"] for fn in growing["functions"]]
+    assert any(cfg["loop_headers"] for cfg in cfgs), (
+        "the growth loop must register a loop header"
+    )
+
+    linear = parse_wasm_bytes(
+        _fixture_bytes("memory_grow_linear.wasm"), "l.wasm", include_cfg=True
+    )
+    grow_cfgs = [
+        fn["cfg"]
+        for fn in linear["functions"]
+        if fn["features"]["has_memory_grow"]
+    ]
+    assert grow_cfgs
+    assert any(cfg["loop_headers"] for cfg in grow_cfgs), (
+        "memory_grow_linear also contains a loop (for the memory traffic)"
+    )
+
+
+def test_cfg_br_table_fanout():
+    cfg = _cfg_of("control_flow_flattened.wasm")
+    # The dispatcher block fans out to every case plus the loop header.
+    fanouts = [
+        len(b["successors"]) for b in cfg["blocks"] if len(b["successors"]) >= 8
+    ]
+    assert fanouts, "the dispatcher block must fan out widely"
+    # Every case body branches back to the loop header.
+    loop_blocks = cfg["loop_headers"]
+    assert loop_blocks
+
+
+def test_cfg_unreachable_blocks_marked_not_dropped():
+    report = parse_wasm_bytes(
+        _fixture_bytes("unreachable.wasm"), "u.wasm", include_cfg=True
+    )
+    marked = 0
+    for fn in report["functions"]:
+        marked += len(fn["cfg"]["unreachable_blocks"])
+        # Blocks are emitted even when unreachable.
+        assert fn["cfg"]["block_count"] >= 1
+    assert marked >= 1, "the spec-suite unreachable fixture has dead blocks"
+
+
+def test_cfg_skipped_when_instructions_omitted():
+    raw = _fixture_bytes("simple_add.wasm")
+    report = parse_wasm_bytes(
+        raw, "s.wasm", include_cfg=True, include_instructions=False
+    )
+    assert all("cfg" not in fn for fn in report["functions"])
+
+
+def test_cfg_incomplete_flagged_on_truncated_decode():
+    # Truncate a fixture mid-body: the truncated function's CFG is marked.
+    raw = _fixture_bytes("dos_growth_loop.wasm")
+    chopped = raw[: len(raw) - 6]
+    report = parse_wasm_bytes(chopped, "c.wasm", include_cfg=True)
+    marked = [fn for fn in report["functions"] if fn["cfg"]["incomplete"]]
+    assert marked or report["errors"], (
+        "truncated bodies must surface either the flag or parse errors"
+    )

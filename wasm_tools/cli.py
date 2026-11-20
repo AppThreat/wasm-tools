@@ -238,6 +238,7 @@ def _run_text_mode(path: str, args: argparse.Namespace, options: ObjdumpOptions)
         "include_instructions": not args.no_instructions,
         "include_demangled": not args.no_demangle,
         "include_features": not args.no_features,
+        "include_cfg": args.cfg,
     }
 
     if args.strings or args.calls or is_component:
@@ -406,6 +407,11 @@ def main() -> None:
         help="Skip call graph construction in --json reports",
     )
     parser.add_argument(
+        "--cfg",
+        action="store_true",
+        help="Attach per-function basic-block CFGs to --json reports",
+    )
+    parser.add_argument(
         "--carve",
         action="store_true",
         help="Scan the input for embedded wasm blobs (any file type) and "
@@ -534,6 +540,7 @@ def main() -> None:
                 "include_instructions": not args.no_instructions,
                 "include_demangled": not args.no_demangle,
                 "include_features": not args.no_features,
+                "include_cfg": args.cfg,
             })
             output = report["analysis"] if args.analysis_only else report
             outputs.append(json.dumps(output, ensure_ascii=False, separators=(",", ":")))
