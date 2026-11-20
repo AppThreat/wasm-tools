@@ -607,3 +607,107 @@ class BinaryReaderObjdumpDisassemble(BinaryReaderObjdumpBase):
 
     def on_opcode_select_t(self, types: List[str]) -> None:
         self._log_opcode(f"({', '.join(types)})")
+
+
+class BinaryReaderObjdumpRaw(BinaryReaderObjdumpBase):
+    """Hexdump section payloads (objdump -s style), one 16-byte row at a time."""
+
+    def __init__(
+        self, data: bytes, options: ObjdumpOptions, state: ObjdumpState
+    ) -> None:
+        super().__init__(data, options, state)
+        self.data = data
+
+    def begin_module(self, version: int) -> None:
+        print("\nSection contents (hexdump):\n")
+
+    def _hexdump(self, payload: bytes, base_offset: int) -> None:
+        for row in range(0, len(payload), 16):
+            chunk = payload[row : row + 16]
+            hex_part = " ".join(f"{b:02x}" for b in chunk)
+            ascii_part = "".join(
+                chr(b) if 0x20 <= b <= 0x7E else "." for b in chunk
+            )
+            print(f"  {base_offset + row:06x}: {hex_part:<47}  {ascii_part}")
+
+    def begin_section(self, section_index: int, section_code: int, size: int) -> None:
+        super().begin_section(section_index, section_code, size)
+        name = SECTION_NAMES.get(section_code, f"Unknown_{section_code}")
+        if section_code == BinarySection.CUSTOM:
+            custom_name = self.objdump_state.section_names.get(
+                section_index, ""
+            )
+            name = f'Custom "{custom_name}"' if custom_name else 'Custom "?"'
+        payload_start = self.offset
+        print(f"\n{name}[{section_index}] ({size} bytes):")
+        if size <= 0:
+            return
+        payload = self.data[payload_start : payload_start + size]
+        self._hexdump(payload, payload_start)
+
+
+class SectionFilter:
+    """Wrap a delegate and forward callbacks only for the selected sections.
+
+    ``wanted_ids`` are section codes (for canonical sections) and
+    ``wanted_custom`` are custom section names; everything else is reduced to
+    no-ops so ``-x`` and ``-d`` output can be scoped without touching the
+    pinned wording of the real visitors. ``on_error`` always passes through.
+    """
+
+    # Attributes the parser assigns on its delegate; they must land on the
+    # wrapped visitor, not on this wrapper.
+    _PROXIED = {"offset", "current_opcode"}
+
+    def __init__(
+        self,
+        inner: Any,
+        wanted_ids: set[int],
+        wanted_custom: set[str],
+    ) -> None:
+        self._inner = inner
+        self._wanted_ids = wanted_ids
+        self._wanted_custom = wanted_custom
+        self._active = False
+
+    def __setattr__(self, attr: str, value: Any) -> None:
+        if attr in type(self)._PROXIED and "_inner" in self.__dict__:
+            setattr(self._inner, attr, value)
+        else:
+            object.__setattr__(self, attr, value)
+
+    def __getattr__(self, attr: str) -> Any:
+        # Only reached for attributes not found normally (the proxied reads).
+        inner = object.__getattribute__(self, "_inner")
+        return getattr(inner, attr)
+
+    def begin_section(self, section_index: int, section_code: int, size: int) -> None:
+        self._active = section_code in self._wanted_ids
+        if self._active:
+            self._inner.begin_section(section_index, section_code, size)
+
+    def begin_custom_section(
+        self, section_index: int, size: int, section_name: str
+    ) -> None:
+        self._active = section_name in self._wanted_custom
+        if self._active:
+            self._inner.begin_custom_section(section_index, size, section_name)
+
+    def begin_module(self, version: int) -> None:
+        # Module banners print regardless of the filter so the output keeps
+        # its shape.
+        self._inner.begin_module(version)
+
+    def end_module(self) -> None:
+        self._inner.end_module()
+
+    def on_error(self, message: str) -> None:
+        # Parse errors are module-level facts; they pass through regardless
+        # of the section filter.
+        self._inner.on_error(message)
+
+    def __getattr__(self, attr: str) -> Any:
+        inner = object.__getattribute__(self, "_inner")
+        if object.__getattribute__(self, "_active"):
+            return getattr(inner, attr)
+        return lambda *args, **kwargs: None

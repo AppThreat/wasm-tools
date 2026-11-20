@@ -1137,3 +1137,88 @@ def test_dependency_hints_from_producers_and_imports():
     wasi_hints = {h["hint"]: h for h in wasi["analysis"]["dependency_hints"]}
     assert "wasi-preview1" in wasi_hints
     assert wasi_hints["wasi-preview1"]["confidence"] == "high"
+
+
+# ─── Vocabulary and evidence registry contract (P14) ─────────────────────────
+
+
+def test_finding_vocabulary_and_evidence_registry_across_fixtures():
+    from wasm_tools.api import (
+        _FINDING_CONFIDENCES,
+        _FINDING_EVIDENCE_KEYS,
+        _FINDING_SEVERITIES,
+    )
+
+    fixtures = [
+        "wasi_capabilities.wasm",
+        "js_interface.wasm",
+        "strings_secrets.wasm",
+        "dos_growth_loop.wasm",
+        "memory_grow_linear.wasm",
+        "complex_flow.wasm",
+        "call_refs.wasm",
+        "simd_basic.wasm",
+        "js_deopt_surface.wasm",
+        "call_indirect.wasm",
+        "corpus/bz2.wasm",
+        "corpus/erc20.wasm",
+    ]
+    # A possible-component preamble exercises WASM-FMT-005, and an inline
+    # relaxed-SIMD body exercises WASM-ISA-008 (0xFD 256 =
+    # i8x16.relaxed_swizzle, no immediates).
+    non_core = b"\x00asm\x02\x00\x00\x00"
+    # 0xFD 256 (LEB 0x80 0x02) = i8x16.relaxed_swizzle, no immediates.
+    relaxed_body = _leb(0) + b"\xfd\x80\x02\x0b"
+    relaxed_code = _leb(1) + _leb(len(relaxed_body)) + relaxed_body
+    relaxed_module = (
+        b"\x00asm\x01\x00\x00\x00"
+        + bytes([1]) + _leb(6) + _leb(1) + b"\x60\x00\x00"
+        + bytes([3]) + _leb(2) + _leb(1) + _leb(0)
+        + bytes([10]) + _leb(len(relaxed_code)) + relaxed_code
+    )
+
+    def reports():
+        for name in fixtures:
+            yield name, parse_wasm_bytes(_fixture_bytes(name), name)
+        yield "non-core", parse_wasm_bytes(non_core, "noncore.wasm")
+        yield "relaxed", parse_wasm_bytes(relaxed_module, "relaxed.wasm")
+
+    seen_findings = set()
+    for name, report in reports():
+        for finding in report["analysis"]["findings"]:
+            seen_findings.add(finding["id"])
+            assert finding["severity"] in _FINDING_SEVERITIES, (
+                f"{finding['id']} severity {finding['severity']!r} is off-vocabulary"
+            )
+            assert finding["confidence"] in _FINDING_CONFIDENCES, (
+                f"{finding['id']} confidence {finding['confidence']!r} is off-vocabulary"
+            )
+            registry = _FINDING_EVIDENCE_KEYS.get(finding["id"], set())
+            assert registry, f"{finding['id']} has no evidence registry entry"
+            extra = set(finding["evidence"]) - registry
+            assert not extra, f"{finding['id']} emits undeclared evidence keys {extra}"
+
+    # Every documented finding id must have appeared at least once across
+    # the corpus, so the registry is exercised, not just defined.
+    from wasm_tools.api import _HIGH_RISK_FINDING_WEIGHTS
+
+    assert seen_findings == set(_HIGH_RISK_FINDING_WEIGHTS), (
+        f"registry gap: missing {set(_HIGH_RISK_FINDING_WEIGHTS) - seen_findings}"
+    )
+
+
+def test_report_contract_version_present():
+    from wasm_tools.api import REPORT_CONTRACT
+
+    for name in ("simple_add.wasm",):
+        report = parse_wasm_bytes(_fixture_bytes(name), name)
+        assert report["report_contract"] == REPORT_CONTRACT == "wasm-tools/2"
+
+    core = _fixture_bytes("simple_add.wasm")
+    imports_payload = _leb(1) + b"\x00" + _name("wasi:cli/run@0.2.0") + b"\x01\x00"
+    component = (
+        b"\x00asm\x0d\x00\x01\x00"
+        + bytes([10]) + _leb(len(imports_payload)) + imports_payload
+        + bytes([1]) + _leb(len(core)) + core
+    )
+    assert parse_wasm_bytes(component, "c.wasm")["report_contract"] == "wasm-tools/2"

@@ -234,10 +234,6 @@ def build_call_graph(
     }
 
 
-def _strip_internal(graph: dict[str, Any]) -> dict[str, Any]:
-    return {k: v for k, v in graph.items() if not k.startswith("_")}
-
-
 def _bfs(
     edges: Sequence[dict[str, Any]], roots: Sequence[int]
 ) -> Tuple[Set[int], Dict[int, int]]:

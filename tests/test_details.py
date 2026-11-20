@@ -6,6 +6,7 @@ import os
 
 import pytest
 
+from wasm_tools import __version__ as wasm_tools_version
 from wasm_tools import cli
 from wasm_tools.models import ObjdumpMode, ObjdumpOptions, ObjdumpState
 from wasm_tools.parser import BinaryReader
@@ -602,3 +603,122 @@ def test_cli_instruction_budget_rejects_negative(monkeypatch, capsys, tmp_path):
         cli.main()
     assert excinfo.value.code == 2
     assert "--instruction-budget must be non-negative" in capsys.readouterr().err
+
+
+def test_cli_section_filter_limits_details_output(monkeypatch, capsys):
+    wasm_path = os.path.join(FIXTURES_DIR, "memory_data.wasm")
+    monkeypatch.setattr(
+        "sys.argv", ["wasm-tools", wasm_path, "-x", "--section", "memory"]
+    )
+    cli.main()
+    out = capsys.readouterr().out
+    assert "Memory[1]:" in out
+    assert "Type[" not in out and "Data[" not in out
+
+
+def test_cli_section_filter_accepts_numeric_ids_and_custom_names(
+    monkeypatch, capsys
+):
+    wasm_path = os.path.join(FIXTURES_DIR, "memory_data.wasm")
+    monkeypatch.setattr(
+        "sys.argv", ["wasm-tools", wasm_path, "-x", "--section", "5"]
+    )
+    cli.main()
+    out = capsys.readouterr().out
+    assert "Memory[1]:" in out
+
+    # A custom section can be selected by name; corpus bz2.wasm carries
+    # DWARF custom sections.
+    bz2_path = os.path.join(FIXTURES_DIR, "corpus", "bz2.wasm")
+    monkeypatch.setattr(
+        "sys.argv", ["wasm-tools", bz2_path, "-x", "--section", ".debug_str"]
+    )
+    cli.main()
+    out = capsys.readouterr().out
+    assert "Custom" in out and ".debug_str" in out
+
+
+def test_cli_section_filter_rejects_unknown_names(monkeypatch, capsys):
+    wasm_path = os.path.join(FIXTURES_DIR, "simple_add.wasm")
+    monkeypatch.setattr(
+        "sys.argv", ["wasm-tools", wasm_path, "-x", "--section", "99"]
+    )
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main()
+    assert excinfo.value.code == 2
+    assert "not a known wasm section id" in capsys.readouterr().err
+
+
+def test_cli_raw_hexdumps_the_selected_section(monkeypatch, capsys):
+    wasm_path = os.path.join(FIXTURES_DIR, "simple_add.wasm")
+    monkeypatch.setattr(
+        "sys.argv", ["wasm-tools", wasm_path, "--raw", "--section", "code"]
+    )
+    cli.main()
+    out = capsys.readouterr().out
+    assert "Code[" in out and "bytes):" in out
+    # 16-byte rows with an ASCII column.
+    assert ": " in out
+    # ASCII column shows printable bytes as characters.
+    assert "  ." in out or ".asm" in out
+    # The wasm magic is not in the code section; the function body end (0x0b)
+    # is.
+    assert "0b" in out
+
+
+def test_cli_raw_without_section_dumps_data_and_announces(monkeypatch, capsys):
+    wasm_path = os.path.join(FIXTURES_DIR, "memory_data.wasm")
+    monkeypatch.setattr("sys.argv", ["wasm-tools", wasm_path, "--raw"])
+    cli.main()
+    out = capsys.readouterr().out
+    assert "(no --section given; dumping the data section)" in out
+    assert "Data[" in out
+
+
+def test_cli_version_prints_package_version(monkeypatch, capsys):
+    wasm_path = os.path.join(FIXTURES_DIR, "simple_add.wasm")
+    monkeypatch.setattr("sys.argv", ["wasm-tools", wasm_path, "--version"])
+    cli.main()
+    out = capsys.readouterr().out.strip()
+    assert out == f"wasm-tools {wasm_tools_version}"
+
+
+def test_cli_multiple_files_emit_json_lines(monkeypatch, capsys):
+    a = os.path.join(FIXTURES_DIR, "simple_add.wasm")
+    b = os.path.join(FIXTURES_DIR, "call_graph.wasm")
+    monkeypatch.setattr("sys.argv", ["wasm-tools", a, b, "--json"])
+    cli.main()
+    lines = [line for line in capsys.readouterr().out.strip().splitlines() if line]
+    assert len(lines) == 2
+    first = json.loads(lines[0])
+    second = json.loads(lines[1])
+    assert first["file"] == a
+    assert second["file"] == b
+    assert first["report_contract"] == second["report_contract"]
+
+
+def test_cli_recursive_walker_parses_all_wasm_files(monkeypatch, capsys, tmp_path):
+    import shutil
+
+    shutil.copy(
+        os.path.join(FIXTURES_DIR, "simple_add.wasm"), tmp_path / "one.wasm"
+    )
+    shutil.copy(
+        os.path.join(FIXTURES_DIR, "call_graph.wasm"), tmp_path / "sub" / "two.wasm"
+    ) if (tmp_path / "sub").exists() else None
+    (tmp_path / "sub").mkdir(exist_ok=True)
+    shutil.copy(
+        os.path.join(FIXTURES_DIR, "call_graph.wasm"), tmp_path / "sub" / "two.wasm"
+    )
+    (tmp_path / "ignore.txt").write_text("not a wasm file")
+
+    monkeypatch.setattr(
+        "sys.argv",
+        ["wasm-tools", "-r", str(tmp_path), "--json"],
+    )
+    cli.main()
+    lines = [line for line in capsys.readouterr().out.strip().splitlines() if line]
+    assert len(lines) == 2
+    files = {json.loads(line)["file"] for line in lines}
+    assert str(tmp_path / "one.wasm") in files
+    assert str(tmp_path / "sub" / "two.wasm") in files

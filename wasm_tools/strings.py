@@ -53,16 +53,6 @@ _RE_MINING = re.compile(
     r"\b(?:stratum\+tcp://|cryptonight|monero|miner|xmr)[^\s]*", re.IGNORECASE
 )
 
-# Signals whose presence always counts as "high interest".
-_ALWAYS_SIGNALS = {
-    "aws_access_key",
-    "jwt_token",
-    "pem_private_key",
-    "url",
-    "mining_indicator",
-}
-
-
 @dataclass
 class StringHit:
     """One extracted printable string with linear-memory provenance."""

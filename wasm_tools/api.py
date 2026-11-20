@@ -39,6 +39,49 @@ _HIGH_RISK_FINDING_WEIGHTS = {
     "WASM-ISA-008": 0,
 }
 
+# Machine-checkable evidence contract (docs/JSON_REFERENCE.md): every
+# finding's evidence keys must stay inside this registry so the shapes
+# consumers (blint, dep-scan) rely on remain small, named, and stable. A
+# test enforces it against every emitted finding.
+_FINDING_EVIDENCE_KEYS: dict[str, set[str]] = {
+    "WASM-CAP-001": {"capabilities"},
+    "WASM-CFG-002": {
+        "indirect_call_ops",
+        "table_mutation_ops",
+        "dynamic_funcs",
+        "table_mutation_funcs",
+    },
+    "WASM-DOS-003": {
+        "memory_grow_ops",
+        "loop_memory_grow_ops",
+        "loop_memory_ops",
+        "functions",
+        "functions_truncated",
+    },
+    "WASM-LOOP-004": {"max_loop_depth"},
+    "WASM-FMT-005": {"kind", "signals", "module_version"},
+    "WASM-JSCFG-006": {
+        "indirect_call_ops",
+        "table_mutation_ops",
+        "js_exposed_dynamic_funcs",
+        "js_exposed_table_mutation_funcs",
+        "paths_from_export",
+    },
+    "WASM-STR-007": {"signals", "counts", "samples"},
+    "WASM-ISA-008": {"relaxed_opcode_count", "opcodes"},
+}
+
+# Finding vocabulary contract: severities and confidences stay inside these
+# sets so downstream converters (dep-scan's blint_convert) never meet a
+# value they must silently remap.
+_FINDING_SEVERITIES = {"critical", "high", "medium", "low", "info"}
+_FINDING_CONFIDENCES = {"high", "medium", "low", "none"}
+
+# Versioned consumer contract for machine consumers (cdxgen, blint): the
+# documented top-level keys are stable within a major version, additive
+# within a minor.
+REPORT_CONTRACT = "wasm-tools/2"
+
 
 def _tier_from_score(score: int) -> str:
     if score >= 70:
@@ -423,6 +466,7 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
             "file": self.filename,
             "module_version": self.module_version,
             "is_component": False,
+            "report_contract": REPORT_CONTRACT,
             "section_count": len(self.sections),
             "sections": self.sections,
             "function_count": len(functions),
@@ -2210,6 +2254,7 @@ def _build_component_report(
         "file": filename,
         "module_version": module_version,
         "is_component": True,
+        "report_contract": REPORT_CONTRACT,
         "section_count": len(sections),
         "sections": sections,
         "function_count": len(functions),
