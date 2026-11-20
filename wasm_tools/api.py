@@ -9,6 +9,8 @@ from typing import Any, Optional
 from .component import (
     detect_component,
     parse_component_bytes,
+    parse_wit_name,
+    suggested_wit_purl,
     wasi_variants_from_interfaces,
 )
 from .graph import build_call_graph, sample_paths
@@ -192,6 +194,7 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
         include_call_graph: bool = True,
         max_instructions_per_function: int | None = None,
         instruction_budget: int | None = None,
+        include_instructions: bool = True,
     ) -> dict[str, Any]:
         """Build the final JSON-ready report for this module.
 
@@ -204,6 +207,9 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
         None (unbounded, the historical behavior). Trimming runs after
         analysis so findings and profiles always describe the full bodies,
         and ``instruction_count`` keeps the pre-trim value.
+        ``include_instructions=False`` drops emitted instruction streams
+        entirely (``instructions_omitted`` marks each function) while
+        analysis, the call graph, and counts still describe the full decode.
         """
         functions = [self._functions[idx] for idx in sorted(self._functions)]
         for fn in functions:
@@ -385,6 +391,8 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
             instruction_budget,
             max_instructions_per_function,
         )
+        if not include_instructions:
+            _strip_instruction_streams(functions)
 
         report = {
             "file": self.filename,
@@ -842,7 +850,118 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
                 },
             },
             "findings": findings,
+            "dependency_hints": self._dependency_hints(
+                imports, exports, component_info
+            ),
         }
+
+    def _dependency_hints(
+        self,
+        imports: list[dict[str, Any]],
+        exports: list[dict[str, Any]],
+        component_info: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Evidence-first framework and interface hints, never version guesses.
+
+        Core-module imports carry no versions in the binary, so a hint only
+        claims a version when a producers entry or a WIT interface name
+        states one. Each hint names its evidence so consumers can audit the
+        claim instead of trusting the label.
+        """
+        hints: list[dict[str, Any]] = []
+
+        def add(hint: str, evidence: list[str], confidence: str) -> None:
+            hints.append(
+                {"hint": hint, "evidence": "; ".join(evidence), "confidence": confidence}
+            )
+
+        producers = self.objdump_state.producers
+        processed_by = {
+            name: version for name, version in producers.get("processed-by", [])
+        }
+        languages = {name for name, _ in producers.get("language", [])}
+        export_names = [str(exp.get("name", "")) for exp in exports]
+        import_modules = [str(imp.get("module", "")) for imp in imports]
+
+        if "wasm-bindgen" in processed_by:
+            add(
+                "wasm-bindgen",
+                [f"producers.processed_by[wasm-bindgen]={processed_by['wasm-bindgen']}"],
+                "high",
+            )
+        else:
+            wbg_exports = [n for n in export_names if n.startswith("__wbindgen")]
+            wbg_imports = [m for m in import_modules if m in {"wbg", "js"}]
+            if wbg_exports or wbg_imports:
+                evidence = []
+                if wbg_exports:
+                    evidence.append(f"{len(wbg_exports)} __wbindgen_* exports")
+                if wbg_imports:
+                    evidence.append(
+                        f"{len(wbg_imports)} imports from module {wbg_imports[0]}"
+                    )
+                add("wasm-bindgen", evidence, "medium")
+
+        emscripten_imports = [
+            imp
+            for imp in imports
+            if "emscripten" in str(imp.get("name", ""))
+            or "invoke_" in str(imp.get("name", ""))
+        ]
+        if emscripten_imports:
+            add(
+                "emscripten",
+                [f"{len(emscripten_imports)} emscripten-glue imports"],
+                "medium",
+            )
+
+        if any(m == "wasi_snapshot_preview1" for m in import_modules):
+            wasi_count = sum(1 for m in import_modules if m == "wasi_snapshot_preview1")
+            add(
+                "wasi-preview1",
+                [f"imports module wasi_snapshot_preview1 ({wasi_count} functions)"],
+                "high",
+            )
+
+        if "rustc" in processed_by or "Rust" in languages:
+            evidence = []
+            if "rustc" in processed_by:
+                evidence.append(f"producers.processed_by[rustc]={processed_by['rustc']}")
+            if "Rust" in languages:
+                evidence.append("producers.language[Rust]")
+            add("rustc", evidence, "high")
+        if "clang" in processed_by or languages & {"C", "C++"}:
+            evidence = []
+            if "clang" in processed_by:
+                evidence.append(f"producers.processed_by[clang]={processed_by['clang']}")
+            if languages & {"C", "C++"}:
+                evidence.append(
+                    f"producers.language[{sorted(languages & {'C', 'C++'})[0]}]"
+                )
+            add("clang", evidence, "high")
+
+        # Component WIT packages are literal versioned interface names.
+        for pkg in (component_info or {}).get("wit_packages", []):
+            version = str(pkg.get("version", ""))
+            name = f"{pkg.get('namespace', '')}:{pkg.get('package', '')}"
+            add(
+                name if not version else f"{name}@{version}",
+                [
+                    f"component {'+'.join(pkg.get('direction', []))} of interface(s) "
+                    + ", ".join(sorted(pkg.get("interfaces", [])))
+                ],
+                "high",
+            )
+
+        fastly_imports = [m for m in import_modules if m.startswith("fastly:")]
+        if fastly_imports:
+            add(
+                "fastly-compute",
+                [f"imports {sorted(set(fastly_imports))[0]}"],
+                "high",
+            )
+
+        return hints
 
     def _wasi_signals_from_imports(
         self,
@@ -1702,6 +1821,23 @@ def _trim_function_instructions(
     return True
 
 
+def _strip_instruction_streams(functions: list[dict[str, Any]]) -> None:
+    """Drop emitted instruction streams, in place, after analysis ran.
+
+    Consumers that only need metadata (SBOM generation, for example) set
+    ``include_instructions=False``: analysis, the call graph, findings, and
+    ``instruction_count`` still describe the full decode because the strip
+    happens at emission time only. Each stripped function gains
+    ``instructions_omitted: true`` so consumers can tell a stripped report
+    from an empty function.
+    """
+    for fn in functions:
+        if not isinstance(fn, dict):
+            continue
+        fn["instructions"] = []
+        fn["instructions_omitted"] = True
+
+
 def _budget_functions(
     functions: list[dict[str, Any]],
     budget: int | None,
@@ -1817,6 +1953,7 @@ def _run_core_pipeline(
     include_call_graph: bool = True,
     max_instructions_per_function: int | None = None,
     instruction_budget: int | None = None,
+    include_instructions: bool = True,
 ) -> dict[str, Any]:
     """Run the two-pass core-module pipeline and return its full report."""
     options = ObjdumpOptions(mode=ObjdumpMode.RAW_DATA, filename=filename)
@@ -1834,6 +1971,7 @@ def _run_core_pipeline(
         include_call_graph=include_call_graph,
         max_instructions_per_function=max_instructions_per_function,
         instruction_budget=instruction_budget,
+        include_instructions=include_instructions,
     )
 
 
@@ -1876,6 +2014,7 @@ def _build_component_report(
     include_call_graph: bool = True,
     max_instructions_per_function: int | None = None,
     instruction_budget: int | None = None,
+    include_instructions: bool = True,
 ) -> dict[str, Any]:
     """Build a full triage report for a component-model binary.
 
@@ -1895,6 +2034,7 @@ def _build_component_report(
             include_call_graph=include_call_graph,
             max_instructions_per_function=max_instructions_per_function,
             instruction_budget=instruction_budget,
+            include_instructions=include_instructions,
         ),
     )
     sections = component.pop("sections", [])
@@ -1921,6 +2061,10 @@ def _build_component_report(
             "kind": "component-" + str(entry.get("kind", "unknown")),
             "core_module": None,
         }
+        wit = parse_wit_name(str(entry.get("name", "")))
+        if wit is not None:
+            record["wit"] = wit
+            record["suggested_purl"] = suggested_wit_purl(wit)
         attributes = entry.get("attributes") or []
         if attributes:
             record["attributes"] = attributes
@@ -1995,6 +2139,25 @@ def _build_component_report(
         component_info=component_info,
         memories=memories,
     )
+
+    if not include_instructions:
+        # Analysis has run; emission-time strip covers the aggregated
+        # functions and every nested core module's own list.
+        _strip_instruction_streams(functions)
+        for module_report in component.get("core_modules", []):
+            _strip_instruction_streams(module_report.get("functions", []))
+
+    wit_packages = component.get("wit_packages", [])
+    if wit_packages:
+        analysis["wit_summary"] = {
+            "package_count": len(wit_packages),
+            "imported_packages": sum(
+                1 for pkg in wit_packages if "import" in pkg["direction"]
+            ),
+            "exported_packages": sum(
+                1 for pkg in wit_packages if "export" in pkg["direction"]
+            ),
+        }
 
     toolchain = _component_toolchain(component)
 
@@ -2090,6 +2253,7 @@ def parse_wasm_bytes(
     include_call_graph: bool = True,
     max_instructions_per_function: int | None = None,
     instruction_budget: int | None = None,
+    include_instructions: bool = True,
 ) -> dict[str, Any]:
     """Parse raw wasm bytes (core module or component) into a report.
 
@@ -2101,7 +2265,9 @@ def parse_wasm_bytes(
     total instruction budget across functions with max-min fair shares
     (per core module for components). Both default to None, which keeps the
     unbounded historical behavior; trimming never changes findings, the call
-    graph, or ``instruction_count``.
+    graph, or ``instruction_count``. ``include_instructions=False`` omits
+    emitted instruction streams entirely for metadata-only consumers; the
+    analysis still describes the full decode.
     """
     if detect_component(data) is not None:
         return _build_component_report(
@@ -2112,6 +2278,7 @@ def parse_wasm_bytes(
             include_call_graph=include_call_graph,
             max_instructions_per_function=max_instructions_per_function,
             instruction_budget=instruction_budget,
+            include_instructions=include_instructions,
         )
     return _run_core_pipeline(
         data,
@@ -2121,6 +2288,7 @@ def parse_wasm_bytes(
         include_call_graph=include_call_graph,
         max_instructions_per_function=max_instructions_per_function,
         instruction_budget=instruction_budget,
+        include_instructions=include_instructions,
     )
 
 
@@ -2131,6 +2299,7 @@ def parse_wasm_file(
     include_call_graph: bool = True,
     max_instructions_per_function: int | None = None,
     instruction_budget: int | None = None,
+    include_instructions: bool = True,
 ) -> dict[str, Any]:
     """Read and parse a wasm file path into a structured report dictionary."""
     try:
@@ -2143,6 +2312,7 @@ def parse_wasm_file(
                 include_call_graph=include_call_graph,
                 max_instructions_per_function=max_instructions_per_function,
                 instruction_budget=instruction_budget,
+                include_instructions=include_instructions,
             )
     except OSError as exc:
         return {
@@ -2240,6 +2410,7 @@ def parse_wasm_bytes_json(
     include_call_graph: bool = True,
     max_instructions_per_function: int | None = None,
     instruction_budget: int | None = None,
+    include_instructions: bool = True,
 ) -> str:
     """Parse wasm bytes and serialize the structured report as JSON text."""
     report = parse_wasm_bytes(
@@ -2250,6 +2421,7 @@ def parse_wasm_bytes_json(
         include_call_graph=include_call_graph,
         max_instructions_per_function=max_instructions_per_function,
         instruction_budget=instruction_budget,
+        include_instructions=include_instructions,
     )
     return json.dumps(report, ensure_ascii=False, indent=indent)
 
@@ -2262,6 +2434,7 @@ def parse_wasm_file_json(
     include_call_graph: bool = True,
     max_instructions_per_function: int | None = None,
     instruction_budget: int | None = None,
+    include_instructions: bool = True,
 ) -> str:
     """Parse a wasm file and serialize the structured report as JSON text."""
     report = parse_wasm_file(
@@ -2271,5 +2444,6 @@ def parse_wasm_file_json(
         include_call_graph=include_call_graph,
         max_instructions_per_function=max_instructions_per_function,
         instruction_budget=instruction_budget,
+        include_instructions=include_instructions,
     )
     return json.dumps(report, ensure_ascii=False, indent=indent)

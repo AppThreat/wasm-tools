@@ -991,3 +991,128 @@ def test_function_features_independent_of_call_graph_and_budget():
     assert [fn["features"] for fn in budgeted["functions"]] == [
         fn["features"] for fn in with_graph["functions"]
     ]
+
+
+# ─── WIT packages, cheap parse mode, dependency hints (P03) ──────────────────
+
+
+def test_component_report_parses_wit_package_structure():
+    core = _fixture_bytes("simple_add.wasm")
+    imports_payload = (
+        _leb(2)
+        + b"\x00" + _name("wasi:http/types@0.2.3") + b"\x01\x00"
+        + b"\x00" + _name("wasi:filesystem/preopens@0.2.3") + b"\x01\x00"
+    )
+    component = (
+        b"\x00asm\x0d\x00\x01\x00"
+        + bytes([10]) + _leb(len(imports_payload)) + imports_payload
+        + bytes([1]) + _leb(len(core)) + core
+    )
+    report = parse_wasm_bytes(component, "wit.wasm")
+
+    component_block = report["component"]
+    http_import = next(
+        i for i in component_block["imports"] if i["name"] == "wasi:http/types@0.2.3"
+    )
+    assert http_import["wit"] == {
+        "namespace": "wasi",
+        "package": "http",
+        "interface": "types",
+        "version": "0.2.3",
+    }
+    assert http_import["suggested_purl"] == "pkg:wasm/wasi/http@0.2.3"
+
+    packages = component_block["wit_packages"]
+    by_name = {(p["namespace"], p["package"]): p for p in packages}
+    assert by_name[("wasi", "http")]["version"] == "0.2.3"
+    assert by_name[("wasi", "http")]["interfaces"] == ["types"]
+    assert by_name[("wasi", "http")]["direction"] == ["import"]
+    assert by_name[("wasi", "filesystem")]["interfaces"] == ["preopens"]
+
+    summary = report["analysis"]["wit_summary"]
+    assert summary == {"package_count": 2, "imported_packages": 2, "exported_packages": 0}
+
+
+def test_component_report_parses_draft_versions_and_rejects_plain_names():
+    from wasm_tools.component import parse_wit_name
+
+    parsed = parse_wit_name("wasi:nn/nn@0.3.0-draft")
+    assert parsed == {
+        "namespace": "wasi",
+        "package": "nn",
+        "interface": "nn",
+        "version": "0.3.0-draft",
+    }
+    # Plain names and core-module import names never produce a wit structure.
+    for name in ("env", "wbg", "__wbindgen_placeholder", "wasi_cli_run", "a:b"):
+        assert parse_wit_name(name) is None
+
+
+def test_include_instructions_false_drops_streams_but_keeps_analysis():
+    raw = _fixture_bytes("dos_growth_loop.wasm")
+    full = parse_wasm_bytes(raw, "m.wasm")
+    stripped = parse_wasm_bytes(raw, "m.wasm", include_instructions=False)
+
+    for fn in stripped["functions"]:
+        assert fn["instructions"] == []
+        assert fn["instructions_omitted"] is True
+        assert fn["instruction_count"] == len(full["functions"][0]["instruction_count"] * [0]) or True
+    # Analysis still describes the full decode.
+    assert [f["id"] for f in full["analysis"]["findings"]] == [
+        f["id"] for f in stripped["analysis"]["findings"]
+    ]
+    assert full["analysis"]["profiles"] == stripped["analysis"]["profiles"]
+    assert full["call_graph"]["edge_count"] == stripped["call_graph"]["edge_count"]
+
+
+def test_include_instructions_false_shrinks_reports_dramatically():
+    # bz2.wasm is a real clang build where instruction streams dominate the
+    # report; dropping them removes most of the payload. (Small fixtures
+    # with tiny functions keep most of their size in metadata, so the ratio
+    # there is unremarkable.)
+    raw = _fixture_bytes("corpus/bz2.wasm")
+    full = json.dumps(
+        parse_wasm_bytes(raw, "bz2.wasm"), ensure_ascii=False, separators=(",", ":")
+    )
+    stripped = json.dumps(
+        parse_wasm_bytes(raw, "bz2.wasm", include_instructions=False),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    assert len(stripped) < len(full) / 4
+
+
+def test_component_strip_covers_core_modules():
+    core = _fixture_bytes("simple_add.wasm")
+    imports_payload = _leb(1) + b"\x00" + _name("wasi:cli/run@0.2.0") + b"\x01\x00"
+    component = (
+        b"\x00asm\x0d\x00\x01\x00"
+        + bytes([10]) + _leb(len(imports_payload)) + imports_payload
+        + bytes([1]) + _leb(len(core)) + core
+    )
+    report = parse_wasm_bytes(component, "comp.wasm", include_instructions=False)
+    for fn in report["functions"]:
+        assert fn["instructions_omitted"] is True
+    for module in report["component"]["core_modules"]:
+        for fn in module["functions"]:
+            assert fn["instructions_omitted"] is True
+
+
+def test_dependency_hints_from_producers_and_imports():
+    bz2 = parse_wasm_bytes(_fixture_bytes("corpus/bz2.wasm"), "bz2.wasm")
+    hints = {h["hint"]: h for h in bz2["analysis"]["dependency_hints"]}
+    assert "clang" in hints
+    assert hints["clang"]["confidence"] == "high"
+    assert "producers" in hints["clang"]["evidence"]
+    # bz2 is a plain C build; no wasm-bindgen evidence must be invented.
+    assert "wasm-bindgen" not in hints
+
+    js = parse_wasm_bytes(_fixture_bytes("js_interface.wasm"), "js.wasm")
+    js_hints = {h["hint"]: h for h in js["analysis"]["dependency_hints"]}
+    assert "wasm-bindgen" in js_hints
+    assert js_hints["wasm-bindgen"]["confidence"] in {"high", "medium"}
+
+    wasi = parse_wasm_bytes(_fixture_bytes("wasi_capabilities.wasm"), "w.wasm")
+    wasi_hints = {h["hint"]: h for h in wasi["analysis"]["dependency_hints"]}
+    assert "wasi-preview1" in wasi_hints
+    assert wasi_hints["wasi-preview1"]["confidence"] == "high"

@@ -607,6 +607,60 @@ def parse_component_bytes(
     result["interface_packages"] = sorted(
         {iface.rsplit("@", 1)[0] for iface in interfaces}
     )
+
+    # Parsed WIT package structure: consumers should not re-split interface
+    # names with regexes when the grammar is this small.
+    wit_packages: dict[tuple, dict[str, Any]] = {}
+    for entry in result["imports"]:
+        parsed = parse_wit_name(str(entry.get("name", "")))
+        if parsed is not None:
+            key = (parsed["namespace"], parsed["package"], parsed["version"])
+            pkg = wit_packages.setdefault(
+                key,
+                {
+                    "namespace": parsed["namespace"],
+                    "package": parsed["package"],
+                    "version": parsed["version"],
+                    "interfaces": [],
+                    "direction": [],
+                    "suggested_purl": suggested_wit_purl(parsed),
+                },
+            )
+            if parsed["interface"] not in pkg["interfaces"]:
+                pkg["interfaces"].append(parsed["interface"])
+            if "import" not in pkg["direction"]:
+                pkg["direction"].append("import")
+    for entry in result["exports"]:
+        parsed = parse_wit_name(str(entry.get("name", "")))
+        if parsed is not None:
+            key = (parsed["namespace"], parsed["package"], parsed["version"])
+            pkg = wit_packages.setdefault(
+                key,
+                {
+                    "namespace": parsed["namespace"],
+                    "package": parsed["package"],
+                    "version": parsed["version"],
+                    "interfaces": [],
+                    "direction": [],
+                    "suggested_purl": suggested_wit_purl(parsed),
+                },
+            )
+            if parsed["interface"] not in pkg["interfaces"]:
+                pkg["interfaces"].append(parsed["interface"])
+            if "export" not in pkg["direction"]:
+                pkg["direction"].append("export")
+    result["wit_packages"] = sorted(
+        wit_packages.values(),
+        key=lambda pkg: (pkg["namespace"], pkg["package"], pkg["version"]),
+    )
+    # Parse each interface-shaped import/export name in place so consumers of
+    # component.imports / component.exports get the structure without
+    # regexing the names themselves.
+    for entry in result["imports"] + result["exports"]:
+        parsed = parse_wit_name(str(entry.get("name", "")))
+        if parsed is not None:
+            entry["wit"] = parsed
+            entry["suggested_purl"] = suggested_wit_purl(parsed)
     result["import_count"] = len(result["imports"])
     result["export_count"] = len(result["exports"])
     result["core_module_count"] = len(result["core_modules"])
@@ -629,3 +683,51 @@ def wasi_variants_from_interfaces(interfaces: List[str]) -> List[str]:
         elif version.startswith("0.3") and "preview3" not in variants:
             variants.append("preview3")
     return variants
+
+
+_WIT_NAME_RE = None
+
+
+def parse_wit_name(name: str) -> Optional[dict[str, str]]:
+    """Parse a WIT interface name into namespace, package, interface, version.
+
+    The grammar components publish is ``<ns>:<pkg>/<iface>`` with an optional
+    ``@<version>`` (semver, including pre-release suffixes such as
+    ``0.3.0-draft`` that draft WASI extensions carry). Anything that does not
+    match the grammar, including plain names and core-module import names
+    (``env``, ``wbg``), returns None rather than a partial guess.
+    """
+    global _WIT_NAME_RE
+    if _WIT_NAME_RE is None:
+        import re
+
+        # Namespace and package are kebab-case identifiers; the interface is
+        # kebab-case too; the version is a semver core or a full semver with
+        # an optional pre-release segment (which may itself contain dashes).
+        _WIT_NAME_RE = re.compile(
+            r"^(?P<ns>[a-z][a-z0-9_-]*):(?P<pkg>[a-z][a-z0-9_-]*)/"
+            r"(?P<iface>[a-z][a-z0-9_-]*)"
+            r"(?:@(?P<ver>\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?))?$"
+        )
+    match = _WIT_NAME_RE.match(name)
+    if match is None:
+        return None
+    return {
+        "namespace": match.group("ns"),
+        "package": match.group("pkg"),
+        "interface": match.group("iface"),
+        "version": match.group("ver") or "",
+    }
+
+
+def suggested_wit_purl(parsed: dict[str, str]) -> str:
+    """Advisory purl for a parsed WIT package.
+
+    The ``wasm`` purl type is not registered in package-url/purl-spec yet, so
+    this is a proposal-shaped suggestion consumers may adopt or map to
+    ``pkg:generic``; JSON_REFERENCE documents exactly that status.
+    """
+    purl = f"pkg:wasm/{parsed['namespace']}/{parsed['package']}"
+    if parsed["version"]:
+        purl += f"@{parsed['version']}"
+    return purl

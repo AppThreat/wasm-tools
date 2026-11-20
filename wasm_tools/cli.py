@@ -222,6 +222,12 @@ def main() -> None:
         help="Skip call graph construction in --json reports",
     )
     parser.add_argument(
+        "--no-instructions",
+        action="store_true",
+        help="Omit per-function instruction streams in --json reports "
+        "(analysis and counts still describe the full decode)",
+    )
+    parser.add_argument(
         "--max-instructions-per-function",
         type=int,
         default=None,
@@ -290,6 +296,7 @@ def main() -> None:
         "include_call_graph": not args.no_call_graph,
         "max_instructions_per_function": args.max_instructions_per_function,
         "instruction_budget": args.instruction_budget,
+        "include_instructions": not args.no_instructions,
     }
 
     if args.json or args.json_out:
