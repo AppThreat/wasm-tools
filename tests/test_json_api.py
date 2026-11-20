@@ -1335,13 +1335,232 @@ def test_obfuscation_dispatcher_signal_and_finding():
     report = parse_wasm_bytes(raw, "cff.wasm")
     detection = report["analysis"]["detections"].get("obfuscation")
     assert detection is not None
-    assert "dispatcher_loop" in detection["signals"]
+    assert detection["signals"] == ["dispatcher_loop"]
+    metric = detection["signal_details"]["dispatcher_loop"]["metric"]
+    assert metric["dispatcher_functions"] == [0, 1]
+    assert {p["form"] for p in metric["profiles"]} == {"br_table", "compare_tree"}
+    for profile in metric["profiles"]:
+        assert profile["constant_initial_state"] is True
+        assert profile["return_share"] == 1.0
     finding = next(
         f for f in report["analysis"]["findings"] if f["id"] == "WASM-OBF-010"
     )
-    assert finding["severity"] == "medium"  # single strong signal
+    assert finding["severity"] == "medium"  # two functions, below widespread
     assert "dispatcher_loop" in finding["evidence"]["signals"]
-    assert finding["evidence"]["dispatcher_functions"]
+    assert finding["evidence"]["dispatcher_functions"] == [0, 1]
+
+
+def _flattened_fixture_functions():
+    report = parse_wasm_bytes(_fixture_bytes("control_flow_flattened.wasm"), "cff")
+    return report["functions"]
+
+
+def _detect(functions, **overrides):
+    from wasm_tools.obfuscation import build_obfuscation_detection
+
+    args = {
+        "functions": functions,
+        "exports": [],
+        "data_segments": [],
+        "segment_payloads": [],
+        "dylink": None,
+        "custom_section_names": {"name"},
+        "has_name_section": True,
+    }
+    args.update(overrides)
+    return build_obfuscation_detection(**args)
+
+
+def _rewrite(fn, rewrite):
+    import copy
+
+    clone = copy.deepcopy(fn)
+    clone["instructions"] = rewrite(clone["instructions"])
+    return clone
+
+
+def _state_local(fn):
+    from wasm_tools.obfuscation import _flattening_profile
+
+    return _flattening_profile(fn["instructions"])["state_local"]
+
+
+def test_obfuscation_flattening_needs_a_constant_initial_state():
+    # A resumable state machine loads its state before the loop; that is
+    # the shape real lexers in the .NET runtime have, and it must not match.
+    def load_initial_state(instructions):
+        loop_at = next(i for i, ins in enumerate(instructions) if ins["opcode"] == "loop")
+        for i in range(loop_at - 1, 0, -1):
+            if instructions[i]["opcode"] == "local.set" and instructions[i - 1]["opcode"] == "i32.const":
+                instructions[i - 1] = {"offset": 0, "opcode": "i32.load", "immediates": [2, 8]}
+                instructions.insert(i - 1, {"offset": 0, "opcode": "local.get", "immediates": [0]})
+                break
+        return instructions
+
+    for fn in _flattened_fixture_functions():
+        state = _state_local(fn)
+        mutated = _rewrite(fn, load_initial_state)
+        detection = _detect([mutated])
+        assert detection is None or "dispatcher_loop" not in detection["signals"], state
+
+
+def test_obfuscation_flattening_needs_cases_to_return_to_the_dispatcher():
+    # A lexer whose cases fall out of the loop or return instead of jumping
+    # back to the dispatcher is not flattened control flow.
+    def leave_instead_of_returning(instructions):
+        out = []
+        for ins in instructions:
+            if ins["opcode"] == "br" and out and out[-1]["opcode"] == "local.set":
+                out.append({"offset": 0, "opcode": "return", "immediates": []})
+            else:
+                out.append(ins)
+        return out
+
+    for fn in _flattened_fixture_functions():
+        detection = _detect([_rewrite(fn, leave_instead_of_returning)])
+        assert detection is None or "dispatcher_loop" not in detection["signals"]
+
+
+def test_obfuscation_flattening_needs_constant_state_writes():
+    # State computed from data (a table-driven machine) is not flattening.
+    def computed_state(instructions):
+        out = []
+        for ins in instructions:
+            if out and ins["opcode"] == "local.set" and out[-1]["opcode"] == "i32.const":
+                out.append({"offset": 0, "opcode": "i32.load8_u", "immediates": [0, 0]})
+            out.append(ins)
+        return out
+
+    for fn in _flattened_fixture_functions():
+        detection = _detect([_rewrite(fn, computed_state)])
+        assert detection is None or "dispatcher_loop" not in detection["signals"]
+
+
+def test_obfuscation_switch_on_parameter_is_not_flattening():
+    # The shape this fixture used to have: a wide br_table on a parameter
+    # inside a loop, cases that only update an accumulator. Ordinary
+    # interpreters and lexers look like this.
+    instructions = [{"offset": 0, "opcode": "block", "immediates": [-64]},
+                    {"offset": 0, "opcode": "loop", "immediates": [-64]}]
+    instructions += [{"offset": 0, "opcode": "block", "immediates": [-64]}] * 7
+    instructions += [
+        {"offset": 0, "opcode": "local.get", "immediates": [0]},
+        {"offset": 0, "opcode": "br_table", "immediates": [7, 0, 1, 2, 3, 4, 5, 6]},
+    ]
+    for case in range(7):
+        instructions += [
+            {"offset": 0, "opcode": "end", "immediates": []},
+            {"offset": 0, "opcode": "local.get", "immediates": [1]},
+            {"offset": 0, "opcode": "i32.const", "immediates": [case]},
+            {"offset": 0, "opcode": "i32.add", "immediates": []},
+            {"offset": 0, "opcode": "local.set", "immediates": [1]},
+            {"offset": 0, "opcode": "br", "immediates": [6 - case]},
+        ]
+    instructions += [{"offset": 0, "opcode": "end", "immediates": []}] * 3
+    fn = {"index": 0, "instructions": instructions,
+          "features": {"has_loop": True, "instruction_count": len(instructions),
+                       "max_br_table_targets_in_loop": 8, "br_table_count": 1}}
+    detection = _detect([fn])
+    assert detection is None or "dispatcher_loop" not in detection["signals"]
+
+
+def _module_with_bodies(bodies):
+    """One-memory module whose functions all have type (i32, i32) -> i32."""
+
+    def leb(n):
+        out = bytearray()
+        while True:
+            b = n & 0x7F
+            n >>= 7
+            if n:
+                out.append(b | 0x80)
+            else:
+                out.append(b)
+                return bytes(out)
+
+    def section(sid, payload):
+        return bytes([sid]) + leb(len(payload)) + payload
+
+    types = section(1, b"\x01\x60\x02\x7f\x7f\x01\x7f")
+    funcs = section(3, leb(len(bodies)) + b"\x00" * len(bodies))
+    memory = section(5, b"\x01\x00\x01")
+    code = section(
+        10, leb(len(bodies)) + b"".join(leb(len(b)) + b for b in bodies)
+    )
+    return b"\x00asm\x01\x00\x00\x00" + types + funcs + memory + code
+
+
+def _code_bodies(raw):
+    """Return each function body (locals and code) from the code section."""
+
+    def leb(pos):
+        value = shift = 0
+        while True:
+            byte = raw[pos]
+            pos += 1
+            value |= (byte & 0x7F) << shift
+            shift += 7
+            if not byte & 0x80:
+                return value, pos
+
+    pos = 8
+    while pos < len(raw):
+        section_id = raw[pos]
+        size, start = leb(pos + 1)
+        if section_id == 10:
+            count, cursor = leb(start)
+            bodies = []
+            for _ in range(count):
+                body_size, cursor = leb(cursor)
+                bodies.append(raw[cursor : cursor + body_size])
+                cursor += body_size
+            return bodies
+        pos = start + size
+    return []
+
+
+def test_obfuscation_widespread_flattening_is_high():
+    # Three or more flattened functions is the pattern of an obfuscator run
+    # over a whole module; reuse the fixture's two bodies twice.
+    bodies = _code_bodies(_fixture_bytes("control_flow_flattened.wasm"))
+    assert len(bodies) == 2
+    widened = parse_wasm_bytes(_module_with_bodies(bodies * 2), "cff4.wasm")
+    assert widened["errors"] == []
+    detection = widened["analysis"]["detections"]["obfuscation"]
+    assert set(detection["signals"]) == {"dispatcher_loop", "flattening_widespread"}
+    finding = next(
+        f for f in widened["analysis"]["findings"] if f["id"] == "WASM-OBF-010"
+    )
+    assert finding["severity"] == "high"
+    assert finding["evidence"]["dispatcher_functions"] == [0, 1, 2, 3]
+
+
+def test_obfuscation_weak_and_packing_signals_never_reach_the_finding():
+    # Packed data, clone herds, a one-door export surface and stripped
+    # names all occur in ordinary release builds (tiktoken, the .NET
+    # runtime, WASI commands); together they score high but stay capped
+    # below the finding without a flattened function.
+    import random
+
+    rng = random.Random(7)
+    blob = bytes(rng.randrange(256) for _ in range(2048))
+    functions = [
+        {"index": i, "instructions": [],
+         "features": {"body_hash": f"sha256:{i % 3}", "instruction_count": 50}}
+        for i in range(40)
+    ]
+    detection = _detect(
+        functions,
+        exports=[{"kind": "func", "name": "_start"}],
+        data_segments=[{"index": 0}],
+        segment_payloads=[(0, 0, blob)],
+        custom_section_names=set(),
+        has_name_section=False,
+    )
+    assert {"packed_data", "duplicate_body_ratio", "minimal_export_surface",
+            "name_section_stripped"} <= set(detection["signals"])
+    assert detection["score"] == 29
+    assert detection["score_capped"] is True
 
 
 def test_obfuscation_thunk_swarm_signal_never_fires_alone():
@@ -1436,11 +1655,19 @@ def test_obfuscation_finding_evidence_matches_registry():
 
 
 def test_obfuscation_corpus_stays_clean():
-    for name in ("corpus/bz2.wasm", "corpus/erc20.wasm", "corpus/erc721.wasm",
-                 "corpus/erc1155.wasm"):
-        report = parse_wasm_bytes(_fixture_bytes(name), name)
+    # Real toolchain output: neither the finding nor the flattening signal.
+    # bz2's decompressor carries 41- and 57-target br_tables inside loops,
+    # the shape the earlier br_table-only heuristic flagged.
+    corpus = sorted(
+        name for name in os.listdir(_fixture_path("corpus")) if name.endswith(".wasm")
+    )
+    assert corpus
+    for name in corpus:
+        report = parse_wasm_bytes(_fixture_bytes(f"corpus/{name}"), name)
         ids = [f["id"] for f in report["analysis"]["findings"]]
         assert "WASM-OBF-010" not in ids, f"{name} must stay clean"
+        detection = report["analysis"]["detections"].get("obfuscation") or {}
+        assert "dispatcher_loop" not in detection.get("signals", []), name
 
 
 def test_data_segments_carry_entropy():
