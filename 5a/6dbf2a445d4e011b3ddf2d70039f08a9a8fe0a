@@ -1,0 +1,34 @@
+wasm_tools/demangle.py
+  s_f313f304041c9f::t_8cdacc18562ce0 16-17,23-26,28-29,32-33,36-38,40-44,46-47,49-53,70-74,79-81,83-103,121-122,125,130,153-155,161-173
+  s_f313f304041c9f::t_94c37b7ad7924e 1-15,18-22,27,30-31,34-35,39,45,48,54-69,75-78,82,104-120,123-124,126-129,131-150,152,156-160
+  s_f313f304041c9f::t_efe34b8b6bf1d8 151
+wasm_tools/api.py
+  s_f313f304041c9f::t_187b2c20e66b36 2553,2579
+  s_f313f304041c9f::t_630fa796de8bba 17-18,260,456,459-479,586,971-983
+  s_f313f304041c9f::t_bba8dbba55b73f 984
+  s_f313f304041c9f::t_c2a1854ea94191 2086,2105,2149,2170,2391,2417,2428,2440,2454,2565,2590
+tests/test_provenance.py
+  s_f313f304041c9f::t_fe1d5055138b2c 1-87,92-187,189-192,194-215
+  s_f313f304041c9f::t_a7e1181a5df4d0 88-91,188,193
+wasm_tools/provenance.py
+  s_f313f304041c9f::t_a7e1181a5df4d0 219-221,223
+  s_f313f304041c9f::t_c5fe95c2225c37 1-218,222,224-254
+wasm_tools/cli.py
+  s_f313f304041c9f::t_a058abc5482569 239,407-411,508
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "5a6dbf2a445d4e011b3ddf2d70039f08a9a8fe0a",
+  "prompts": {},
+  "sessions": {
+    "s_f313f304041c9f": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "sess_02a3d826-3148-4c5e-a179-e38422bb7d90",
+        "model": "GLM-5.3"
+      },
+      "human_author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  }
+}
