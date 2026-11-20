@@ -241,8 +241,24 @@ def _run_text_mode(path: str, args: argparse.Namespace, options: ObjdumpOptions)
         "include_cfg": args.cfg,
     }
 
-    if args.strings or args.calls or is_component:
+    if args.strings or args.calls or is_component or args.print_wat or args.wat_out:
         report = parse_wasm_bytes(data, filename=path, **report_kwargs)
+
+    if args.print_wat or args.wat_out:
+        from .wat import emit_wat
+
+        wat_text = emit_wat(report, source=data)
+        if args.print_wat:
+            print(wat_text, end="")
+        if args.wat_out:
+            try:
+                with open(args.wat_out, "w", encoding="utf-8") as out_file:
+                    out_file.write(wat_text)
+            except Exception as e:
+                print(f"Error writing {args.wat_out}: {e}", file=sys.stderr)
+                sys.exit(1)
+        if not (args.strings or args.calls):
+            return
 
     if args.strings:
         _print_strings_from_report(report)
@@ -410,6 +426,16 @@ def main() -> None:
         "--cfg",
         action="store_true",
         help="Attach per-function basic-block CFGs to --json reports",
+    )
+    parser.add_argument(
+        "--print-wat",
+        action="store_true",
+        help="Print WAT text for the module (flat style)",
+    )
+    parser.add_argument(
+        "--wat-out",
+        metavar="PATH",
+        help="Write WAT text to PATH",
     )
     parser.add_argument(
         "--carve",

@@ -199,6 +199,15 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
         }
         self._functions[index] = self._current_function
 
+    def on_local_decl(self, func_idx: int, decl_index: int, count: int, ltype: str) -> None:
+        """Record one local declaration group for the active function."""
+        if self._current_function is not None and int(func_idx) == int(
+            self._current_function.get("index", -1)
+        ):
+            self._current_function.setdefault("local_decls", []).append(
+                [int(count), str(ltype)]
+            )
+
     def end_function_body(self, index: int) -> None:
         """Close function collection and flush unfinished instruction records."""
         if self._pending_instruction and self._current_function:
@@ -268,6 +277,75 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
     def on_error(self, message: str) -> None:
         """Capture parser errors for programmatic callers."""
         self.errors.append(message)
+
+    def on_opcode_select_t(self, types: list) -> None:
+        """Record typed select's valtype vector."""
+        if self._pending_instruction is None:
+            return
+        self._pending_instruction["immediates"].extend([str(t) for t in types])
+        self._finalize_instruction()
+
+    def on_opcode_heap_type(self, ht: str) -> None:
+        """Record heap-type immediates (ref.cast, ref.test, call_ref)."""
+        if self._pending_instruction is None:
+            return
+        self._pending_instruction["immediates"].append(str(ht))
+        self._finalize_instruction()
+
+    def on_opcode_v128(self, raw: bytes) -> None:
+        """Record v128.const's 16 raw bytes."""
+        if self._pending_instruction is None:
+            return
+        self._pending_instruction["immediates"] = list(raw)
+        self._finalize_instruction()
+
+    def on_opcode_v128_shuffle(self, lanes: list) -> None:
+        """Record v128.shuffle's 16 lane indices."""
+        if self._pending_instruction is None:
+            return
+        self._pending_instruction["immediates"].extend(int(v) for v in lanes)
+        self._finalize_instruction()
+
+    def on_opcode_br_on_cast(self, flags: int, label: int, ht1: str, ht2: str) -> None:
+        """Record br_on_cast's flags, label, and heap types."""
+        if self._pending_instruction is None:
+            return
+        self._pending_instruction["immediates"].extend(
+            [int(flags), int(label), str(ht1), str(ht2)]
+        )
+        self._finalize_instruction()
+
+    def on_opcode_try_table(self, sig: int, catches: list) -> None:
+        """Record try_table's block signature and catch clauses."""
+        if self._pending_instruction is None:
+            return
+        recorded: list = [int(sig)]
+        for clause in catches:
+            recorded.extend(int(v) for v in clause)
+        self._pending_instruction["immediates"] = recorded
+        self._pending_instruction["catches"] = [
+            [int(v) for v in clause] for clause in catches
+        ]
+        self._finalize_instruction()
+
+    def on_opcode_memarg_lane(self, align: int, mem_offset: int, lane: int) -> None:
+        """Record v128 lane-access immediates: align, offset, lane."""
+        if self._pending_instruction is None:
+            return
+        self._pending_instruction["immediates"].extend(
+            [int(align), int(mem_offset), int(lane)]
+        )
+        self._finalize_instruction()
+
+    def on_opcode_memarg(self, align: int, mem_offset: int, mem_idx=None) -> None:
+        """Record memarg immediates, including an explicit memory index."""
+        if self._pending_instruction is None:
+            return
+        immediates = self._pending_instruction["immediates"]
+        if mem_idx is not None:
+            immediates.append(int(mem_idx))
+        immediates.extend([int(align), int(mem_offset)])
+        self._finalize_instruction()
 
     def on_opcode_lane_idx(self, lane: int) -> None:
         """Finalize lane-index SIMD opcodes."""

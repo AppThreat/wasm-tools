@@ -39,6 +39,12 @@ _DEFAULT_MAX_SIZE = 64 * 1024 * 1024
 _MAX_SECTIONS_PER_BLOB = 100_000
 _MIN_SIZE = 8  # magic + version/layer preamble
 
+# Canonical section order: DataCount (id 12) sits between element (9) and
+# code (10) in the binary, so ordering uses positions, not raw ids.
+_CANONICAL_ORDER = {
+    1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6, 7: 7, 8: 8, 9: 9, 12: 10, 10: 11, 11: 12,
+}
+
 _BASE64_RUN_RE = re.compile(rb"[A-Za-z0-9+/]{1024,}={0,2}")
 _BASE64_MIN_DECODED = 1024
 
@@ -61,7 +67,7 @@ def _bound_blob(data: bytes, start: int) -> tuple[int, bool]:
     offset = start + 8  # past magic + version/layer
     size = len(data)
     sections = 0
-    last_canonical_id = -1
+    last_canonical_id = -1  # position space
     while offset < size:
         sections += 1
         if sections > _MAX_SECTIONS_PER_BLOB:
@@ -75,11 +81,14 @@ def _bound_blob(data: bytes, start: int) -> tuple[int, bool]:
             # Not a section id: the module ended cleanly.
             return offset, False
         if section_id != 0:
-            if section_id <= last_canonical_id:
-                # Canonical ids only move forward; a smaller id here is the
-                # start of the next embedded module.
+            position = _CANONICAL_ORDER.get(section_id)
+            if position is None:
                 return offset, False
-            last_canonical_id = section_id
+            if position <= last_canonical_id:
+                # Canonical positions only move forward; a smaller position
+                # here is the start of the next embedded module.
+                return offset, False
+            last_canonical_id = position
         offset += 1
         section_size = 0
         shift = 0

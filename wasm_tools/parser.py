@@ -877,10 +877,18 @@ class BinaryReader:
                     self.delegate.on_opcode_f64(val)
 
             elif imm_type == ImmType.MEMARG:
+                # Multi-memory: bit 6 of the align field signals an explicit
+                # memory index that follows (multi-memory proposal).
                 align = self.read_leb128(max_bits=32)
+                mem_idx = None
+                if align & 0x40:
+                    align &= ~0x40
+                    mem_idx = self.read_leb128(max_bits=32)
                 # memory64 extends memarg offsets from u32 to u64.
                 mem_offset = self.read_leb128(max_bits=64)
-                if hasattr(self.delegate, "on_opcode_uint32_uint32"):
+                if hasattr(self.delegate, "on_opcode_memarg"):
+                    self.delegate.on_opcode_memarg(align, mem_offset, mem_idx)
+                elif hasattr(self.delegate, "on_opcode_uint32_uint32"):
                     self.delegate.on_opcode_uint32_uint32(align, mem_offset)
 
             elif imm_type == ImmType.BR_TABLE:

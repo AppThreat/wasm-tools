@@ -603,6 +603,14 @@ class BinaryReaderObjdumpDisassemble(BinaryReaderObjdumpBase):
     def on_opcode_lane_idx(self, lane: int) -> None:
         self._log_opcode(f"{lane}")
 
+    def on_opcode_memarg(self, align: int, mem_offset: int, mem_idx=None) -> None:
+        # Multi-memory modules carry an explicit memory index; render it
+        # first to match the index order the other multi-index ops use.
+        if mem_idx is not None:
+            self._log_opcode(f"{mem_idx} {align} {mem_offset}")
+        else:
+            self._log_opcode(f"{align} {mem_offset}")
+
     def on_opcode_memarg_lane(self, align: int, mem_offset: int, lane: int) -> None:
         self._log_opcode(f"{align} {mem_offset} lane={lane}")
 
