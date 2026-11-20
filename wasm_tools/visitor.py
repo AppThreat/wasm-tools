@@ -279,9 +279,10 @@ class BinaryReaderObjdumpPrepass(BinaryReaderObjdumpBase):
         if retained is None:
             retained = {}
             self.objdump_state.debug_payloads = retained
-        if sum(len(value) for value in retained.values()) >= type(
-            self
-        )._MAX_DWARF_RETENTION:
+        # The budget covers the section being added: one oversized section
+        # is skipped (no source mapping) rather than copied in full.
+        used = sum(len(value) for value in retained.values())
+        if used + len(payload) > type(self)._MAX_DWARF_RETENTION:
             return
         retained[name] = bytes(payload)
 
@@ -573,8 +574,8 @@ class BinaryReaderObjdumpDisassemble(BinaryReaderObjdumpBase):
     def on_end_expr(self) -> None:
         self._log_opcode()
 
-    def on_opcode_block_sig(self, sig: int) -> None:
-        self._log_opcode(f"sig={sig}")
+    def on_opcode_block_sig(self, sig: int, ref_type: Optional[str] = None) -> None:
+        self._log_opcode(f"sig={ref_type if ref_type is not None else sig}")
 
     def on_opcode_index(self, idx: int) -> None:
         self._log_opcode(f"{idx}")
@@ -611,8 +612,11 @@ class BinaryReaderObjdumpDisassemble(BinaryReaderObjdumpBase):
         else:
             self._log_opcode(f"{align} {mem_offset}")
 
-    def on_opcode_memarg_lane(self, align: int, mem_offset: int, lane: int) -> None:
-        self._log_opcode(f"{align} {mem_offset} lane={lane}")
+    def on_opcode_memarg_lane(
+        self, align: int, mem_offset: int, lane: int, mem_idx=None
+    ) -> None:
+        prefix = f"{mem_idx} " if mem_idx is not None else ""
+        self._log_opcode(f"{prefix}{align} {mem_offset} lane={lane}")
 
     def on_opcode_v128(self, raw: bytes) -> None:
         self._log_opcode("0x" + raw.hex())
@@ -627,8 +631,11 @@ class BinaryReaderObjdumpDisassemble(BinaryReaderObjdumpBase):
     def on_opcode_br_on_cast(self, flags: int, label: int, ht1: str, ht2: str) -> None:
         self._log_opcode(f"{label} {ht1} {ht2}")
 
-    def on_opcode_try_table(self, sig: int, catches: list) -> None:
-        self._log_opcode(f"sig={sig} catches={len(catches)}")
+    def on_opcode_try_table(
+        self, sig: int, catches: list, ref_type: Optional[str] = None
+    ) -> None:
+        shown = ref_type if ref_type is not None else sig
+        self._log_opcode(f"sig={shown} catches={len(catches)}")
 
     def on_opcode_select_t(self, types: List[str]) -> None:
         self._log_opcode(f"({', '.join(types)})")
@@ -682,7 +689,7 @@ class SectionFilter:
 
     # Attributes the parser assigns on its delegate; they must land on the
     # wrapped visitor, not on this wrapper.
-    _PROXIED = {"offset", "current_opcode"}
+    _PROXIED = {"offset", "current_opcode", "function_body_offset"}
 
     def __init__(
         self,
@@ -700,11 +707,6 @@ class SectionFilter:
             setattr(self._inner, attr, value)
         else:
             object.__setattr__(self, attr, value)
-
-    def __getattr__(self, attr: str) -> Any:
-        # Only reached for attributes not found normally (the proxied reads).
-        inner = object.__getattribute__(self, "_inner")
-        return getattr(inner, attr)
 
     def begin_section(self, section_index: int, section_code: int, size: int) -> None:
         self._active = section_code in self._wanted_ids
@@ -732,7 +734,13 @@ class SectionFilter:
         self._inner.on_error(message)
 
     def __getattr__(self, attr: str) -> Any:
+        # Reached only for names this wrapper does not define. A name the
+        # wrapped visitor lacks raises AttributeError, so the parser's
+        # hasattr checks see the same delegate surface as without the
+        # filter; callbacks outside the selected sections become no-ops,
+        # and plain attributes (the proxied reads) always pass through.
         inner = object.__getattribute__(self, "_inner")
-        if object.__getattribute__(self, "_active"):
-            return getattr(inner, attr)
+        value = getattr(inner, attr)
+        if object.__getattribute__(self, "_active") or not callable(value):
+            return value
         return lambda *args, **kwargs: None

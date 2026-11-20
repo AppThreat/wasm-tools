@@ -194,6 +194,7 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
             "name": self.objdump_state.function_names.get(index, ""),
             "signature_index": self.objdump_state.function_types.get(index),
             "offset": self.offset,
+            "body_offset": getattr(self, "function_body_offset", None),
             "body_size": size,
             "instructions": [],
         }
@@ -233,8 +234,12 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
         """Finalize an `end` opcode that closes an expression."""
         self._finalize_instruction()
 
-    def on_opcode_block_sig(self, sig: int) -> None:
-        """Finalize block-like opcodes with signature immediates."""
+    def on_opcode_block_sig(self, sig: int, ref_type=None) -> None:
+        """Finalize block-like opcodes with signature immediates. A block
+        that yields a reference type also records its name in
+        ``block_type``, since the integer alone cannot carry the heap type."""
+        if ref_type is not None and self._pending_instruction is not None:
+            self._pending_instruction["block_type"] = str(ref_type)
         self._append_immediates(sig)
 
     def on_opcode_index(self, idx: int) -> None:
@@ -315,10 +320,12 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
         )
         self._finalize_instruction()
 
-    def on_opcode_try_table(self, sig: int, catches: list) -> None:
+    def on_opcode_try_table(self, sig: int, catches: list, ref_type=None) -> None:
         """Record try_table's block signature and catch clauses."""
         if self._pending_instruction is None:
             return
+        if ref_type is not None:
+            self._pending_instruction["block_type"] = str(ref_type)
         recorded: list = [int(sig)]
         for clause in catches:
             recorded.extend(int(v) for v in clause)
@@ -326,15 +333,6 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
         self._pending_instruction["catches"] = [
             [int(v) for v in clause] for clause in catches
         ]
-        self._finalize_instruction()
-
-    def on_opcode_memarg_lane(self, align: int, mem_offset: int, lane: int) -> None:
-        """Record v128 lane-access immediates: align, offset, lane."""
-        if self._pending_instruction is None:
-            return
-        self._pending_instruction["immediates"].extend(
-            [int(align), int(mem_offset), int(lane)]
-        )
         self._finalize_instruction()
 
     def on_opcode_memarg(self, align: int, mem_offset: int, mem_idx=None) -> None:
@@ -351,9 +349,15 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
         """Finalize lane-index SIMD opcodes."""
         self._append_immediates(lane)
 
-    def on_opcode_memarg_lane(self, align: int, mem_offset: int, lane: int) -> None:
-        """Finalize SIMD memory lane opcodes with align, offset, and lane immediates."""
-        self._append_immediates(align, mem_offset, lane)
+    def on_opcode_memarg_lane(
+        self, align: int, mem_offset: int, lane: int, mem_idx=None
+    ) -> None:
+        """Record v128 lane-access immediates: the memory index when explicit
+        (as for plain memargs), then align, offset and lane."""
+        if mem_idx is not None:
+            self._append_immediates(int(mem_idx), int(align), int(mem_offset), int(lane))
+        else:
+            self._append_immediates(int(align), int(mem_offset), int(lane))
 
     def _append_immediates(self, *values: Any) -> None:
         """Append immediate values and finalize the current instruction."""
@@ -633,13 +637,13 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
                     ),
                     0,
                 )
+                # DW_AT_low_pc and the line rows name the body start (the
+                # locals vector after the body size), relative to the code
+                # section payload.
                 addresses = [
-                    (
-                        int(fn.get("index", -1)),
-                        int(fn.get("offset", 0)) - code_section_offset,
-                    )
+                    (int(fn["index"]), int(fn["body_offset"]) - code_section_offset)
                     for fn in functions
-                    if isinstance(fn.get("index"), int)
+                    if isinstance(fn.get("index"), int) and isinstance(fn.get("body_offset"), int)
                 ]
                 sources = map_function_sources(line_table, addresses)
                 for fn in functions:
