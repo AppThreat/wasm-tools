@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from typing import Any, Optional
 
@@ -508,14 +509,63 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
             for imp in imports
             if str(imp.get("kind", "")) == "func" and self._is_js_related_import(imp)
         }
+        imported_function_count = self.objdump_state.imported_function_count
+        simd_prefixes = (
+            "v128.",
+            "i8x16.",
+            "i16x8.",
+            "i32x4.",
+            "i64x2.",
+            "f32x4.",
+            "f64x2.",
+            "f16x8.",
+        )
+        exception_ops = {
+            "try_table",
+            "throw",
+            "throw_ref",
+            "try",
+            "catch",
+            "catch_all",
+            "rethrow",
+            "delegate",
+        }
+        gc_ops = {
+            "ref.eq",
+            "any.convert_extern",
+            "extern.convert_any",
+            "br_on_cast",
+            "br_on_cast_fail",
+        }
 
         for fn in functions:
             active_loops = 0
             block_stack: list[str] = []
             instructions = fn.get("instructions", [])
+            fn_max_loop_depth = 0
+            fn_features = {
+                "has_loop": False,
+                "max_loop_depth": 0,
+                "has_direct_call": False,
+                "has_indirect_call": False,
+                "has_call_ref": False,
+                "has_tail_call": False,
+                "has_table_mutation": False,
+                "has_memory_grow": False,
+                "has_bulk_memory": False,
+                "has_simd": False,
+                "has_atomics": False,
+                "has_exceptions": False,
+                "has_gc_ops": False,
+                "calls_imported_functions": False,
+                "imported_callees": 0,
+            }
+            imported_callees: set[int] = set()
+            fn_mnemonics: list[str] = []
             for ins_idx, ins in enumerate(instructions):
                 op = ins.get("opcode", "")
                 op_counts[op] = op_counts.get(op, 0) + 1
+                fn_mnemonics.append(op)
 
                 if op.startswith("unknown_"):
                     unknown_opcode_count += 1
@@ -525,12 +575,48 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
                     block_stack.append(op)
                     if op == "loop":
                         active_loops += 1
+                        fn_max_loop_depth = max(fn_max_loop_depth, active_loops)
                         loop_max_depth = max(loop_max_depth, active_loops)
                 elif op == "end" and block_stack:
                     if block_stack.pop() == "loop":
                         active_loops = max(0, active_loops - 1)
                 elif op == "delegate" and block_stack:
                     block_stack.pop()
+
+                if op == "loop":
+                    fn_features["has_loop"] = True
+                if op in {"call", "return_call"}:
+                    fn_features["has_direct_call"] = True
+                    if op == "return_call":
+                        fn_features["has_tail_call"] = True
+                    if op == "call" and ins.get("immediates"):
+                        target = ins["immediates"][0]
+                        if isinstance(target, int) and target < imported_function_count:
+                            fn_features["calls_imported_functions"] = True
+                            imported_callees.add(target)
+                if op in {"call_indirect", "return_call_indirect"}:
+                    fn_features["has_indirect_call"] = True
+                    fn_features["has_tail_call"] = fn_features["has_tail_call"] or (
+                        op == "return_call_indirect"
+                    )
+                if op in call_ref_ops:
+                    fn_features["has_call_ref"] = True
+                if op in table_mutators:
+                    fn_features["has_table_mutation"] = True
+                if op == "memory.grow":
+                    fn_features["has_memory_grow"] = True
+                if op in bulk_memory:
+                    fn_features["has_bulk_memory"] = True
+                if op.startswith(simd_prefixes):
+                    fn_features["has_simd"] = True
+                if op.startswith(
+                    ("memory.atomic.", "i32.atomic.", "i64.atomic.")
+                ) or op == "atomic.fence":
+                    fn_features["has_atomics"] = True
+                if op in exception_ops:
+                    fn_features["has_exceptions"] = True
+                if op.startswith(("struct.", "array.", "ref.i31", "i31.get")) or op in gc_ops:
+                    fn_features["has_gc_ops"] = True
 
                 is_memory_access = (
                     op.startswith("i32.load")
@@ -598,6 +684,18 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
                 if op in table_mutators:
                     table_mutation_ops += 1
                     table_mutation_funcs.add(fn.get("index", -1))
+
+            fn_features["max_loop_depth"] = fn_max_loop_depth
+            fn_features["instruction_count"] = len(instructions)
+            fn_features["imported_callees"] = len(imported_callees)
+            # body_hash covers the mnemonic sequence only (immediates
+            # excluded), so two functions with the same instruction shape
+            # hash identically regardless of constant values.
+            fn_features["body_hash"] = (
+                "sha256:"
+                + hashlib.sha256(" ".join(fn_mnemonics).encode("utf-8")).hexdigest()
+            )
+            fn["features"] = fn_features
 
         capabilities = sorted(
             self._capabilities_from_imports(imports)

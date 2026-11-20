@@ -872,3 +872,122 @@ def test_component_report_aggregates_per_module_truncation():
     assert module_block["core_module"] == 0
     assert module_block["budget"] == 30
     assert truncation["total_kept"] == module_block["total_kept"]
+
+
+# ─── Per-function structural features (P02) ──────────────────────────────────
+
+
+def test_function_features_present_on_every_local_function():
+    raw = _fixture_bytes("call_graph.wasm")
+    report = parse_wasm_bytes(raw, "call_graph.wasm")
+    for fn in report["functions"]:
+        features = fn["features"]
+        for key in (
+            "instruction_count",
+            "has_loop",
+            "max_loop_depth",
+            "has_direct_call",
+            "has_indirect_call",
+            "has_call_ref",
+            "has_tail_call",
+            "has_table_mutation",
+            "has_memory_grow",
+            "has_bulk_memory",
+            "has_simd",
+            "has_atomics",
+            "has_exceptions",
+            "has_gc_ops",
+            "calls_imported_functions",
+            "imported_callees",
+            "body_hash",
+        ):
+            assert key in features, f"missing feature {key}"
+
+
+def test_function_features_track_indirect_calls_and_loops():
+    raw = _fixture_bytes("call_graph.wasm")
+    report = parse_wasm_bytes(raw, "call_graph.wasm")
+    indirect_fns = [
+        fn for fn in report["functions"] if fn["features"]["has_indirect_call"]
+    ]
+    assert indirect_fns, "call_indirect fixture must have an indirect caller"
+
+
+def test_function_features_distinguish_loop_growth():
+    growing = parse_wasm_bytes(
+        _fixture_bytes("dos_growth_loop.wasm"), "dos_growth_loop.wasm"
+    )
+    grow_features = [
+        fn["features"] for fn in growing["functions"] if fn["features"]["has_memory_grow"]
+    ]
+    assert grow_features, "the growing function must report has_memory_grow"
+    assert any(f["has_loop"] for f in grow_features), (
+        "growth inside a loop must also report has_loop"
+    )
+
+    linear = parse_wasm_bytes(
+        _fixture_bytes("memory_grow_linear.wasm"), "memory_grow_linear.wasm"
+    )
+    # Features are function-granular, so the linear module's function
+    # reports both flags; the loop-vs-grow nesting distinction that DOS-003
+    # cares about stays in the analysis profiles (loop_memory_grow_ops).
+    linear_grow = [
+        fn["features"] for fn in linear["functions"] if fn["features"]["has_memory_grow"]
+    ]
+    assert linear_grow
+    growing_profiles = growing["analysis"]["profiles"]["memory"]
+    linear_profiles = linear["analysis"]["profiles"]["memory"]
+    assert growing_profiles["loop_memory_grow_ops"] > 0
+    assert linear_profiles["loop_memory_grow_ops"] == 0
+
+
+def test_function_features_flag_isa_families():
+    cases = {
+        "simd_basic.wasm": "has_simd",
+        "threads_basic.wasm": "has_atomics",
+        "exceptions_basic.wasm": "has_exceptions",
+        "gc_ops.wasm": "has_gc_ops",
+        "call_refs.wasm": "has_call_ref",
+        "bulk_memory.wasm": "has_bulk_memory",
+    }
+    for fixture, key in cases.items():
+        report = parse_wasm_bytes(_fixture_bytes(fixture), fixture)
+        assert any(fn["features"][key] for fn in report["functions"]), (
+            f"{fixture} must set {key} on at least one function"
+        )
+
+
+def test_function_features_count_imported_callees():
+    raw = _fixture_bytes("import_calls.wasm")
+    report = parse_wasm_bytes(raw, "import_calls.wasm")
+    callers = [
+        fn for fn in report["functions"] if fn["features"]["calls_imported_functions"]
+    ]
+    assert len(callers) == 2, "both exported functions call WASI imports"
+    # fd_write is called from both functions, proc_exit from one.
+    assert sum(f["features"]["imported_callees"] for f in callers) == 3
+    assert all(f["features"]["imported_callees"] >= 1 for f in callers)
+
+
+def test_function_body_hash_matches_identical_bodies():
+    raw = _fixture_bytes("duplicate_bodies.wasm")
+    report = parse_wasm_bytes(raw, "duplicate_bodies.wasm")
+    # wat2wasm emits no name section here, so key functions by index:
+    # 0 and 1 are the identical bodies, 2 is distinct.
+    hashes = {fn["index"]: fn["features"]["body_hash"] for fn in report["functions"]}
+    assert hashes[0] == hashes[1]
+    assert hashes[0] != hashes[2]
+    assert hashes[0].startswith("sha256:")
+
+
+def test_function_features_independent_of_call_graph_and_budget():
+    raw = _fixture_bytes("dos_growth_loop.wasm")
+    without_graph = parse_wasm_bytes(raw, "m.wasm", include_call_graph=False)
+    with_graph = parse_wasm_bytes(raw, "m.wasm")
+    assert [fn["features"] for fn in without_graph["functions"]] == [
+        fn["features"] for fn in with_graph["functions"]
+    ]
+    budgeted = parse_wasm_bytes(raw, "m.wasm", instruction_budget=3)
+    assert [fn["features"] for fn in budgeted["functions"]] == [
+        fn["features"] for fn in with_graph["functions"]
+    ]
