@@ -1,0 +1,52 @@
+docs/COMPONENT_MODEL.md
+  s_f313f304041c9f::t_6641cc41a0e707 64-65,74,125
+docs/_sidebar.md
+  s_f313f304041c9f::t_d32f4234463eda 11-13,16-17
+docs/DWARF.md
+  s_f313f304041c9f::t_50abfb1e4d5710 1-47
+docs/FINDINGS.md
+  s_f313f304041c9f::t_1c10ba5cc93e94 124-125,127-129,144,156-157
+  s_f313f304041c9f::t_c2adbd1112d4b7 95-96
+docs/ARCHITECTURE.md
+  s_f313f304041c9f::t_65dd01f4eba77a 20-29
+README.md
+  s_f313f304041c9f::t_65dd01f4eba77a 18-22
+wasm_tools/__init__.py
+  s_f313f304041c9f::t_65dd01f4eba77a 12
+docs/CARVING.md
+  s_f313f304041c9f::t_3acc14e907cfca 1-63
+docs/JSON_REFERENCE.md
+  s_f313f304041c9f::t_ddc808c2347476 20-33,76-77,80,82-87
+  s_f313f304041c9f::t_25ecc8863ba141 116-194
+  s_f313f304041c9f::t_22aa989fede19a 241-242,260-262
+docs/CUSTOM_SECTIONS.md
+  s_f313f304041c9f::t_7883ea2ce99642 1-58
+docs/MIGRATION.md
+  s_f313f304041c9f::t_00420a23ac0d6a 1-59
+docs/PROVENANCE.md
+  s_f313f304041c9f::t_d81bb83ff4a260 1-55
+docs/CLI.md
+  s_f313f304041c9f::t_4dbf48daba1293 18-19,23-29,32-37,42-51
+pyproject.toml
+  s_f313f304041c9f::t_65dd01f4eba77a 3
+docs/COVERAGE.md
+  s_f313f304041c9f::t_d067765fcab73a 55-58,72-81,85
+docs/WAT.md
+  s_f313f304041c9f::t_e6b3453c85b067 1-46
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "1ea57e4500efd749d453c490f461d0b9f20135b3",
+  "prompts": {},
+  "sessions": {
+    "s_f313f304041c9f": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "sess_02a3d826-3148-4c5e-a179-e38422bb7d90",
+        "model": "GLM-5.3"
+      },
+      "human_author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  }
+}
