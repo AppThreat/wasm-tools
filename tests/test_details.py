@@ -552,3 +552,53 @@ def test_headers_name_section_fixture(capsys):
         pytest.skip("gc_rec_group.wasm not found (built with wasm-tools)")
     out = _run_headers(_fixture("gc_rec_group.wasm"))
     assert 'name: "name"' in out
+
+
+def test_cli_instruction_budget_flags_reach_the_report(monkeypatch, capsys, tmp_path):
+    import shutil
+
+    src = os.path.join(FIXTURES_DIR, "unreachable.wasm")
+    wasm_path = tmp_path / "unreachable.wasm"
+    shutil.copy(src, wasm_path)
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "wasm-tools",
+            str(wasm_path),
+            "--json",
+            "--instruction-budget",
+            "20",
+            "--max-instructions-per-function",
+            "6",
+        ],
+    )
+    cli.main()
+    parsed = json.loads(capsys.readouterr().out.strip())
+
+    truncation = parsed["truncation"]["instructions"]
+    assert truncation["budget"] == 20
+    assert truncation["per_function_cap"] == 6
+    assert truncation["total_kept"] <= 20
+    for fn in parsed["functions"]:
+        assert len(fn["instructions"]) <= 6
+    # Analysis still describes the full bodies.
+    assert sum(fn["instruction_count"] for fn in parsed["functions"]) == (
+        truncation["total_original"]
+    )
+
+
+def test_cli_instruction_budget_rejects_negative(monkeypatch, capsys, tmp_path):
+    import shutil
+
+    src = os.path.join(FIXTURES_DIR, "simple_add.wasm")
+    wasm_path = tmp_path / "simple_add.wasm"
+    shutil.copy(src, wasm_path)
+
+    monkeypatch.setattr(
+        "sys.argv", ["wasm-tools", str(wasm_path), "--json", "--instruction-budget", "-1"]
+    )
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main()
+    assert excinfo.value.code == 2
+    assert "--instruction-budget must be non-negative" in capsys.readouterr().err

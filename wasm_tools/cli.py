@@ -222,6 +222,21 @@ def main() -> None:
         help="Skip call graph construction in --json reports",
     )
     parser.add_argument(
+        "--max-instructions-per-function",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Cap each function's emitted instruction stream at N entries",
+    )
+    parser.add_argument(
+        "--instruction-budget",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Share a total instruction budget of N across functions "
+        "(max-min fair; per core module for components)",
+    )
+    parser.add_argument(
         "--calls",
         metavar="FUNC",
         help="Print an outgoing call tree for a function (name or index)",
@@ -248,6 +263,13 @@ def main() -> None:
         parser.error("--analysis-only requires --json and/or --json-out")
     if args.no_call_graph and args.calls:
         parser.error("--calls requires the call graph; do not combine with --no-call-graph")
+    if args.instruction_budget is not None and args.instruction_budget < 0:
+        parser.error("--instruction-budget must be non-negative")
+    if (
+        args.max_instructions_per_function is not None
+        and args.max_instructions_per_function < 0
+    ):
+        parser.error("--max-instructions-per-function must be non-negative")
 
     options = ObjdumpOptions()
     options.filename = args.file
@@ -266,6 +288,8 @@ def main() -> None:
         "strings_min_len": args.strings_min_len,
         "include_strings": not args.no_strings,
         "include_call_graph": not args.no_call_graph,
+        "max_instructions_per_function": args.max_instructions_per_function,
+        "instruction_budget": args.instruction_budget,
     }
 
     if args.json or args.json_out:

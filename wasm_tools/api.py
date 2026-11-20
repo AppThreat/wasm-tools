@@ -189,13 +189,20 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
         strings_min_len: int = 5,
         include_strings: bool = True,
         include_call_graph: bool = True,
+        max_instructions_per_function: int | None = None,
+        instruction_budget: int | None = None,
     ) -> dict[str, Any]:
         """Build the final JSON-ready report for this module.
 
         ``strings_min_len`` controls extraction (the CLI flag must reach this
         call or short strings can never surface); ``include_strings`` and
         ``include_call_graph`` let consumers opt out of the heavier derived
-        blocks.
+        blocks. ``max_instructions_per_function`` caps every function's
+        emitted instruction stream and ``instruction_budget`` shares a total
+        budget across functions with max-min fair shares; both default to
+        None (unbounded, the historical behavior). Trimming runs after
+        analysis so findings and profiles always describe the full bodies,
+        and ``instruction_count`` keeps the pre-trim value.
         """
         functions = [self._functions[idx] for idx in sorted(self._functions)]
         for fn in functions:
@@ -370,7 +377,15 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
             memories=memories,
         )
 
-        return {
+        # Trim after analysis: findings, profiles, and the call graph must
+        # always describe the full bodies even when emission is budgeted.
+        truncation = _budget_functions(
+            functions,
+            instruction_budget,
+            max_instructions_per_function,
+        )
+
+        report = {
             "file": self.filename,
             "module_version": self.module_version,
             "is_component": False,
@@ -399,6 +414,9 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
             "analysis": analysis,
             "errors": self.errors,
         }
+        if truncation is not None:
+            report["truncation"] = truncation
+        return report
 
     @staticmethod
     def _limits_dict(limits: Any) -> dict[str, Any]:
@@ -1548,12 +1566,159 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
         return findings
 
 
+def _fair_instruction_shares(lengths: list[int], budget: int) -> list[int]:
+    """Max-min fair share of ``budget`` instructions across function lengths.
+
+    Water-filling from the shortest function: every function still in play
+    gets an equal slice of what remains, capped by its own length. Ties are
+    broken by position so results are deterministic.
+    """
+    if budget <= 0:
+        return [0] * len(lengths)
+    order = sorted(range(len(lengths)), key=lambda i: (lengths[i], i))
+    shares = [0] * len(lengths)
+    remaining = budget
+    for position, index in enumerate(order):
+        still_playing = len(lengths) - position
+        allowance = remaining // still_playing
+        kept = min(lengths[index], allowance)
+        shares[index] = kept
+        remaining -= kept
+    return shares
+
+
+def _trim_function_instructions(
+    fn: dict[str, Any], cap: int
+) -> bool:
+    """Trim one function's instruction list to ``cap`` entries, in place.
+
+    ``instruction_count`` keeps the pre-trim value so consumers can still see
+    the true body size; returns True when the function was actually trimmed.
+    """
+    instructions = fn.get("instructions")
+    if not isinstance(instructions, list) or len(instructions) <= cap:
+        return False
+    fn["instructions_kept"] = cap
+    fn["instructions_truncated"] = True
+    fn["instructions"] = instructions[:cap]
+    return True
+
+
+def _budget_functions(
+    functions: list[dict[str, Any]],
+    budget: int | None,
+    per_function: int | None,
+    seen: set[int] | None = None,
+) -> dict[str, Any] | None:
+    """Apply an instruction budget to a list of function dicts, in place.
+
+    The per-function cap applies first, then the max-min fair budget shares
+    whatever is left across the capped lengths. ``seen`` tracks dict identity
+    so aliased entries (the same dict reachable from two lists) are counted
+    once. Returns the truncation block, or None when nothing was trimmed.
+    """
+    if seen is None:
+        seen = set()
+    unique = []
+    for fn in functions:
+        if not isinstance(fn, dict):
+            continue
+        marker = id(fn)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        unique.append(fn)
+    original_total = sum(len(fn.get("instructions") or []) for fn in unique)
+    if per_function is not None:
+        for fn in unique:
+            _trim_function_instructions(fn, per_function)
+    lengths = [len(fn.get("instructions") or []) for fn in unique]
+    total_after_cap = sum(lengths)
+    budget_hit = budget is not None and total_after_cap > budget
+    if not budget_hit and original_total == total_after_cap:
+        return None
+    truncated_functions = 0
+    if budget_hit:
+        shares = _fair_instruction_shares(lengths, budget)
+        for fn, share in zip(unique, shares):
+            if _trim_function_instructions(fn, share):
+                truncated_functions += 1
+        kept = sum(shares)
+    else:
+        # Only the per-function cap bit; count the functions it trimmed.
+        truncated_functions = sum(
+            1 for fn in unique if fn.get("instructions_truncated")
+        )
+        kept = total_after_cap
+    return {
+        "instructions": {
+            "budget": budget,
+            "per_function_cap": per_function,
+            "total_kept": kept,
+            "total_original": original_total,
+            "truncated_functions": truncated_functions,
+            "function_count": len(unique),
+        }
+    }
+
+
+def apply_instruction_budget(
+    report: dict[str, Any],
+    budget: int | None = None,
+    per_function: int | None = None,
+) -> dict[str, Any] | None:
+    """Trim instruction streams in an already-built report, in place.
+
+    Consumers holding a report built without budgets can apply the same
+    trimming the parse-time parameters would have produced. Component trees
+    are covered: top-level functions plus every nested core module's
+    functions are trimmed, and aliased function dicts (the same object
+    reachable from two lists) are counted once. Returns the truncation block
+    describing what was kept, or None when nothing was trimmed.
+    """
+    if budget is None and per_function is None:
+        return None
+    seen: set[int] = set()
+    blocks: list[dict[str, Any]] = []
+
+    def visit(node: dict[str, Any]) -> None:
+        block = _budget_functions(
+            node.get("functions") or [], budget, per_function, seen
+        )
+        if block is not None:
+            blocks.append(block)
+        for module in (node.get("component") or {}).get("core_modules", []) or []:
+            visit(module)
+        for nested in (node.get("component") or {}).get("nested_components", []) or []:
+            visit(nested)
+
+    visit(report)
+    if not blocks:
+        return None
+    instructions_blocks = [b["instructions"] for b in blocks]
+    return {
+        "instructions": {
+            "budget": budget,
+            "per_function_cap": per_function,
+            "total_kept": sum(b["total_kept"] for b in instructions_blocks),
+            "total_original": sum(b["total_original"] for b in instructions_blocks),
+            "truncated_functions": sum(
+                b["truncated_functions"] for b in instructions_blocks
+            ),
+            "function_count": sum(b["function_count"] for b in instructions_blocks),
+            "blocks": instructions_blocks,
+        }
+    }
+
+
 def _run_core_pipeline(
     data: bytes,
     filename: str = "<core-module>",
     strings_min_len: int = 5,
     include_strings: bool = True,
     include_call_graph: bool = True,
+    max_instructions_per_function: int | None = None,
+    instruction_budget: int | None = None,
 ) -> dict[str, Any]:
     """Run the two-pass core-module pipeline and return its full report."""
     options = ObjdumpOptions(mode=ObjdumpMode.RAW_DATA, filename=filename)
@@ -1569,6 +1734,8 @@ def _run_core_pipeline(
         strings_min_len=strings_min_len,
         include_strings=include_strings,
         include_call_graph=include_call_graph,
+        max_instructions_per_function=max_instructions_per_function,
+        instruction_budget=instruction_budget,
     )
 
 
@@ -1609,13 +1776,17 @@ def _build_component_report(
     strings_min_len: int = 5,
     include_strings: bool = True,
     include_call_graph: bool = True,
+    max_instructions_per_function: int | None = None,
+    instruction_budget: int | None = None,
 ) -> dict[str, Any]:
     """Build a full triage report for a component-model binary.
 
     Nested core modules are decoded with the regular core pipeline and their
     section data is aggregated at the top level (each entry tagged with
     ``core_module``), so the analysis layer and downstream consumers see one
-    combined behavior picture.
+    combined behavior picture. Instruction budgets apply per core module:
+    every nested module gets the full budget, and the per-module truncation
+    blocks are aggregated under ``truncation.instructions.core_modules``.
     """
     component = parse_component_bytes(
         data,
@@ -1624,6 +1795,8 @@ def _build_component_report(
             strings_min_len=strings_min_len,
             include_strings=include_strings,
             include_call_graph=include_call_graph,
+            max_instructions_per_function=max_instructions_per_function,
+            instruction_budget=instruction_budget,
         ),
     )
     sections = component.pop("sections", [])
@@ -1727,7 +1900,7 @@ def _build_component_report(
 
     toolchain = _component_toolchain(component)
 
-    return {
+    report = {
         "file": filename,
         "module_version": module_version,
         "is_component": True,
@@ -1757,6 +1930,35 @@ def _build_component_report(
         "analysis": analysis,
         "errors": errors,
     }
+
+    # Aggregate the per-core-module truncation blocks (each module received
+    # the full budget independently) into the component-level block.
+    module_blocks = []
+    for module_index, module_report in enumerate(component.get("core_modules", [])):
+        block = module_report.get("truncation")
+        if block:
+            entry = dict(block["instructions"])
+            entry["core_module"] = module_index
+            module_blocks.append(entry)
+    if module_blocks:
+        report["truncation"] = {
+            "instructions": {
+                "budget": instruction_budget,
+                "per_function_cap": max_instructions_per_function,
+                "total_kept": sum(b["total_kept"] for b in module_blocks),
+                "total_original": sum(
+                    b["total_original"] for b in module_blocks
+                ),
+                "truncated_functions": sum(
+                    b["truncated_functions"] for b in module_blocks
+                ),
+                "function_count": sum(
+                    b["function_count"] for b in module_blocks
+                ),
+                "core_modules": module_blocks,
+            }
+        }
+    return report
 
 
 def _component_toolchain(component: dict[str, Any]) -> dict[str, Any]:
@@ -1788,13 +1990,20 @@ def parse_wasm_bytes(
     strings_min_len: int = 5,
     include_strings: bool = True,
     include_call_graph: bool = True,
+    max_instructions_per_function: int | None = None,
+    instruction_budget: int | None = None,
 ) -> dict[str, Any]:
     """Parse raw wasm bytes (core module or component) into a report.
 
     ``strings_min_len`` is the extraction threshold (must reach extraction to
     be effective below the default of 5); ``include_strings`` /
     ``include_call_graph`` opt out of the derived blocks for consumers that
-    only need section data.
+    only need section data. ``max_instructions_per_function`` caps each
+    function's emitted instruction stream; ``instruction_budget`` shares a
+    total instruction budget across functions with max-min fair shares
+    (per core module for components). Both default to None, which keeps the
+    unbounded historical behavior; trimming never changes findings, the call
+    graph, or ``instruction_count``.
     """
     if detect_component(data) is not None:
         return _build_component_report(
@@ -1803,6 +2012,8 @@ def parse_wasm_bytes(
             strings_min_len=strings_min_len,
             include_strings=include_strings,
             include_call_graph=include_call_graph,
+            max_instructions_per_function=max_instructions_per_function,
+            instruction_budget=instruction_budget,
         )
     return _run_core_pipeline(
         data,
@@ -1810,6 +2021,8 @@ def parse_wasm_bytes(
         strings_min_len=strings_min_len,
         include_strings=include_strings,
         include_call_graph=include_call_graph,
+        max_instructions_per_function=max_instructions_per_function,
+        instruction_budget=instruction_budget,
     )
 
 
@@ -1818,6 +2031,8 @@ def parse_wasm_file(
     strings_min_len: int = 5,
     include_strings: bool = True,
     include_call_graph: bool = True,
+    max_instructions_per_function: int | None = None,
+    instruction_budget: int | None = None,
 ) -> dict[str, Any]:
     """Read and parse a wasm file path into a structured report dictionary."""
     try:
@@ -1828,6 +2043,8 @@ def parse_wasm_file(
                 strings_min_len=strings_min_len,
                 include_strings=include_strings,
                 include_call_graph=include_call_graph,
+                max_instructions_per_function=max_instructions_per_function,
+                instruction_budget=instruction_budget,
             )
     except OSError as exc:
         return {
@@ -1923,6 +2140,8 @@ def parse_wasm_bytes_json(
     strings_min_len: int = 5,
     include_strings: bool = True,
     include_call_graph: bool = True,
+    max_instructions_per_function: int | None = None,
+    instruction_budget: int | None = None,
 ) -> str:
     """Parse wasm bytes and serialize the structured report as JSON text."""
     report = parse_wasm_bytes(
@@ -1931,6 +2150,8 @@ def parse_wasm_bytes_json(
         strings_min_len=strings_min_len,
         include_strings=include_strings,
         include_call_graph=include_call_graph,
+        max_instructions_per_function=max_instructions_per_function,
+        instruction_budget=instruction_budget,
     )
     return json.dumps(report, ensure_ascii=False, indent=indent)
 
@@ -1941,6 +2162,8 @@ def parse_wasm_file_json(
     strings_min_len: int = 5,
     include_strings: bool = True,
     include_call_graph: bool = True,
+    max_instructions_per_function: int | None = None,
+    instruction_budget: int | None = None,
 ) -> str:
     """Parse a wasm file and serialize the structured report as JSON text."""
     report = parse_wasm_file(
@@ -1948,5 +2171,7 @@ def parse_wasm_file_json(
         strings_min_len=strings_min_len,
         include_strings=include_strings,
         include_call_graph=include_call_graph,
+        max_instructions_per_function=max_instructions_per_function,
+        instruction_budget=instruction_budget,
     )
     return json.dumps(report, ensure_ascii=False, indent=indent)

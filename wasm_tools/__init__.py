@@ -1,4 +1,5 @@
 from .api import (
+    apply_instruction_budget,
     parse_wasm_bytes,
     parse_wasm_bytes_json,
     parse_wasm_file,

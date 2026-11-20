@@ -2,6 +2,7 @@ import json
 import os
 
 from wasm_tools.api import (
+    apply_instruction_budget,
     parse_wasm_bytes,
     parse_wasm_bytes_json,
     parse_wasm_file,
@@ -756,3 +757,118 @@ def test_parse_wasm_file_reports_branch_hints():
 
     assert "branch_hints_present" in report["analysis"]["detections"]["format"]["signals"]
     assert "isa.branch-hints" in report["analysis"]["capabilities"]
+
+
+# ─── Instruction budgets (P01) ───────────────────────────────────────────────
+
+
+def test_instruction_budget_default_reports_have_no_truncation_block():
+    raw = _fixture_bytes("unreachable.wasm")
+    report = parse_wasm_bytes(raw, "unreachable.wasm")
+    assert "truncation" not in report
+    for fn in report["functions"]:
+        assert "instructions_truncated" not in fn
+
+
+def test_instruction_budget_caps_total_and_keeps_counts():
+    raw = _fixture_bytes("unreachable.wasm")
+    full = parse_wasm_bytes(raw, "unreachable.wasm")
+    budgeted = parse_wasm_bytes(raw, "unreachable.wasm", instruction_budget=40)
+
+    kept = sum(len(fn["instructions"]) for fn in budgeted["functions"])
+    assert kept <= 40
+    # instruction_count stays the pre-trim truth on every function.
+    assert kept < sum(fn["instruction_count"] for fn in budgeted["functions"])
+    assert [fn["instruction_count"] for fn in full["functions"]] == [
+        fn["instruction_count"] for fn in budgeted["functions"]
+    ]
+
+    truncation = budgeted["truncation"]["instructions"]
+    assert truncation["budget"] == 40
+    assert truncation["total_kept"] == kept
+    assert truncation["total_original"] == sum(
+        fn["instruction_count"] for fn in budgeted["functions"]
+    )
+    assert truncation["truncated_functions"] > 0
+    trimmed = [fn for fn in budgeted["functions"] if fn.get("instructions_truncated")]
+    assert trimmed
+    for fn in trimmed:
+        assert fn["instructions_kept"] == len(fn["instructions"])
+
+
+def test_per_function_instruction_cap():
+    raw = _fixture_bytes("unreachable.wasm")
+    report = parse_wasm_bytes(
+        raw, "unreachable.wasm", max_instructions_per_function=5
+    )
+    for fn in report["functions"]:
+        assert len(fn["instructions"]) <= 5
+        if fn["instruction_count"] > 5:
+            assert fn["instructions_truncated"] is True
+            assert fn["instructions_kept"] == 5
+        else:
+            assert "instructions_truncated" not in fn
+
+
+def test_instruction_budget_waterfall_is_max_min_fair():
+    from wasm_tools.api import _fair_instruction_shares
+
+    # [10, 1, 1] with budget 6: equal allowance of 2 first spends 4, the
+    # remainder 2 extends the long function to 4 kept.
+    assert _fair_instruction_shares([10, 1, 1], 6) == [4, 1, 1]
+    # A generous budget never trims.
+    assert _fair_instruction_shares([10, 1, 1], 100) == [10, 1, 1]
+    assert _fair_instruction_shares([], 50) == []
+    # Zero budget keeps nothing.
+    assert _fair_instruction_shares([7, 3], 0) == [0, 0]
+
+
+def test_instruction_budget_preserves_findings_and_graph():
+    raw = _fixture_bytes("dos_growth_loop.wasm")
+    full = parse_wasm_bytes(raw, "dos_growth_loop.wasm")
+    budgeted = parse_wasm_bytes(raw, "dos_growth_loop.wasm", instruction_budget=3)
+    assert [f["id"] for f in full["analysis"]["findings"]] == [
+        f["id"] for f in budgeted["analysis"]["findings"]
+    ]
+    assert (
+        full["call_graph"]["edge_count"] == budgeted["call_graph"]["edge_count"]
+    )
+
+
+def test_apply_instruction_budget_trims_component_trees():
+    raw = _fixture_bytes("unreachable.wasm")
+    report = parse_wasm_bytes(raw, "unreachable.wasm")
+    block = apply_instruction_budget(report, budget=10)
+    assert block is not None
+    kept = sum(len(fn["instructions"]) for fn in report["functions"])
+    assert kept <= 10
+    assert block["instructions"]["total_kept"] == kept
+    # Applying again with no budget is a no-op.
+    assert apply_instruction_budget(report, budget=None, per_function=None) is None
+
+
+def test_apply_instruction_budget_counts_aliased_functions_once():
+    from wasm_tools.api import _budget_functions
+
+    fn = {"instructions": list(range(10))}
+    functions = [fn, fn]  # aliased on purpose
+    block = _budget_functions(functions, budget=4, per_function=None)
+    assert block["instructions"]["function_count"] == 1
+    assert block["instructions"]["total_kept"] == 4
+
+
+def test_component_report_aggregates_per_module_truncation():
+    core = _fixture_bytes("unreachable.wasm")
+    imports_payload = _leb(1) + b"\x00" + _name("wasi:cli/run@0.2.0") + b"\x01\x00"
+    component = (
+        b"\x00asm\x0d\x00\x01\x00"
+        + bytes([10]) + _leb(len(imports_payload)) + imports_payload
+        + bytes([1]) + _leb(len(core)) + core
+    )
+    report = parse_wasm_bytes(component, "comp.wasm", instruction_budget=30)
+    truncation = report.get("truncation", {}).get("instructions", {})
+    assert truncation.get("core_modules"), "expected per-module truncation entries"
+    module_block = truncation["core_modules"][0]
+    assert module_block["core_module"] == 0
+    assert module_block["budget"] == 30
+    assert truncation["total_kept"] == module_block["total_kept"]
