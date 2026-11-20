@@ -2,9 +2,10 @@
 
 ## Migrating to 2.2.0 (additive)
 
-Version 2.2.0 is a minor release: every change below is additive to the
-JSON report contract, and `report_contract` stays `wasm-tools/2`. Consumers
-that tolerate unknown keys need no changes.
+Version 2.2.0 is a minor release and `report_contract` stays
+`wasm-tools/2`. For core modules every change below is additive, so
+consumers that tolerate unknown keys need no changes. Component reports
+change in two places, listed under "Behavior changes".
 
 New report keys and analysis blocks:
 
@@ -45,6 +46,24 @@ New library parameters (all keyword, all defaulted to preserve behavior):
 multi-file inputs (JSON Lines for `--json` with more than one input).
 
 Behavior changes worth knowing:
+
+- Component call graphs: 2.1 built one graph over the flattened function
+  list of all core modules, where indices from different modules collided.
+  2.2 keeps each module's own graph and tags nodes and edges with module
+  ids, so a node's `index` is now meaningful only together with its
+  `module_id`. Component `reachability.reachable_functions` and
+  `unreachable_functions` hold `[module_id, index]` pairs instead of
+  integers; the `*_count` keys are unchanged in meaning.
+- Synthetic `component:type<N>` nodes (index 10,000,000 + N, `imported:
+  true`, `synthetic: true`) and `canon` edges from them to lifted core
+  functions appear in component call graphs.
+- SIMD lane loads and stores (`v128.load8_lane` and friends) that name a
+  memory carry four immediates, `[memory, align, offset, lane]`, matching
+  the plain memarg order; without a memory index they keep three.
+- Functions gain `body_offset`, the file offset of the body itself. The
+  existing `offset` keeps its 2.1 value for compatibility; it is not the
+  body start, so code that needs the body's position should switch to
+  `body_offset`.
 
 - `--section` accepts numeric ids 0-13, canonical names, or custom section
   names; an out-of-range id exits 2.

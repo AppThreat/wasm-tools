@@ -76,7 +76,8 @@ Only locally defined functions appear here; imports are in `imports`.
 | `name`                | From the `name` custom section; object-file modules get names from the linking symbol table when the name section is absent (the name section wins where both exist). Empty string when stripped. |
 | `demangled_name`      | Present when demangling changes the name (Rust legacy and v0 crate paths); presentation only, never a graph identity. |
 | `signature_index`     | Index into `types`.                                         |
-| `offset`, `body_size` | Byte offset and byte length of the body in the file.        |
+| `offset`, `body_size` | Byte offset recorded when the body starts decoding (kept for compatibility: it is not the body start) and the body's byte length. |
+| `body_offset` | File offset of the body itself (the locals vector, just past the size field). DWARF `low_pc` and line rows point here, relative to the code section payload. |
 | `local_decls`         | Local declaration groups as `[count, valtype]` pairs, in code-section order. |
 | `instructions`        | Decoded instruction list, see below.                        |
 | `instruction_count`   | Convenience count; always the pre-trim truth.               |
@@ -143,7 +144,8 @@ With `include_cfg=True` or `--cfg`, each function gains a basic-block control-fl
   "block_count": 3,
   "edge_count": 3,
   "blocks": [
-    {"id": 0, "start": 0, "end": 27, "instructions": 12, "labels": ["entry"], "successors": [1, 2]}
+    {"id": 0, "start": 0, "end": 27, "instructions": 12, "labels": [], "successors": [1, 2]},
+    {"id": 2, "start": 31, "end": 44, "instructions": 6, "labels": ["loop"], "successors": [2, 3]}
   ],
   "loop_headers": [2],
   "unreachable_blocks": [],
@@ -151,7 +153,7 @@ With `include_cfg=True` or `--cfg`, each function gains a basic-block control-fl
 }
 ```
 
-Block ids are dense and ordered by start offset, successors are sorted, and every instruction belongs to exactly one block (asserted across the fixtures). Fan-out past 64 successors truncates the list with a `successors_truncated` marker on the block. Truncated decodes set `incomplete: true`; the CFG is skipped when instruction emission is off. The recovery is structural: dead code after unconditional exits is emitted and marked, never dropped.
+Block ids are dense and ordered by start offset, successors are sorted, and every instruction belongs to exactly one block (asserted across the fixtures). A block that starts at a structured opener carries that opener's mnemonic in `labels`; every other block has an empty list. A branch to a `loop` label goes to the loop's start, and a branch to a `block`, `if`, `try_table` or `try` label goes past the matching `end`. Fan-out past 64 successors truncates the list with a `successors_truncated` marker on the block. Truncated decodes set `incomplete: true`; the CFG is skipped when instruction emission is off. The recovery is structural: dead code after unconditional exits is emitted and marked, never dropped.
 
 ## Instruction budgets and truncation
 
@@ -238,7 +240,7 @@ A labeled static call graph over the module-global function index space:
 
 Edge kinds: `direct` is a resolved `call`; `indirect-approx` is derived from element segments (any function in a table entry could be dispatched); `typed-approx` groups by signature type where no table evidence exists. The approximate kinds are over-approximations by design. Reachability is computed from exports and the start function; `unreachable_functions` is dead code the host can never reach through declared entry points. Skip the block with `--no-call-graph` or `include_call_graph=False`. [Lesson 6](LESSON6.md) works an example.
 
-Nodes may also carry `demangled_name` when demangling changes the label; identity stays index-based. On component reports the graph is module-scoped: every node carries `module_id`, every edge carries `from_module` and `to_module`, and node identity is the `(module_id, index)` pair (flattened indices collide across core modules and always did). `canon` edges connect core functions to synthetic `component:type<N>` nodes from the canon lift/lower records. `reachability` becomes a `per_module` map plus component-level counts, and `component_summary` carries module, canon-edge, and synthetic-node counts. Single-module reports never carry these keys.
+Nodes may also carry `demangled_name` when demangling changes the label; identity stays index-based. On component reports the graph is module-scoped: every node carries `module_id`, every edge carries `from_module` and `to_module`, and node identity is the `(module_id, index)` pair (flattened indices collide across core modules and always did). A `canon` edge runs from a synthetic `component:type<N>` node (imported, `synthetic: true`, index 10,000,000 + N) to the core function a canon lift lifts: the component calls into the core code. The lift is tied to its module function through the core instance and alias sections; a lift that cannot be tied that way, and every canon lower, adds no edge. `reachability` keeps the core keys (`roots`, `reachable_functions`, `reachable_count`, `unreachable_functions`, `unreachable_count`), with the function lists holding `[module_id, index]` pairs, plus a `per_module` map; `edge_count` always equals the length of `edges`, and `component_summary` carries module, canon-edge, and synthetic-node counts. Single-module reports never carry these keys.
 
 ## `toolchain`
 
