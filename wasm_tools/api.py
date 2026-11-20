@@ -16,7 +16,7 @@ from .component import (
 from .customsections import name_precedence_names
 from .demangle import demangle
 from .provenance import build_provenance
-from .graph import build_call_graph, sample_paths
+from .graph import build_call_graph, merge_component_graphs, sample_paths
 from .models import ObjdumpMode, ObjdumpOptions, ObjdumpState, SECTION_NAMES
 from .parser import BinaryReader
 from .strings import (
@@ -2245,12 +2245,14 @@ def _build_component_report(
 
     call_graph = None
     if include_call_graph:
-        call_graph = build_call_graph(
-            functions=functions,
-            imports=imports,
-            exports=exports,
-            elements=elements,
-            start_function=None,
+        # Module-scoped merge: flattened function indices collide across core
+        # modules, so nodes carry module_id and edges carry from_module /
+        # to_module; canon lift/lower records contribute canon edges to
+        # synthetic component:type<N> nodes. Each module keeps its own
+        # reachability block.
+        call_graph = merge_component_graphs(
+            component.get("core_modules", []),
+            component.get("canon_records", []),
         )
 
     module_version = data[4] | (data[5] << 8) | (data[6] << 16) | (data[7] << 24)

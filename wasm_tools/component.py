@@ -342,17 +342,24 @@ def _read_canon_options(r: _CReader) -> List[str]:
 
 
 def _decode_component_section(
-    section_id: int, r: _CReader, end: int
+    section_id: int,
+    r: _CReader,
+    end: int,
+    section_context: Optional[dict[str, Any]] = None,
 ) -> Tuple[List[dict[str, Any]], List[str], List[str], dict[str, Any]]:
     """Best-effort decode of import/export/canon sections.
 
     Returns (imports, exports, canon_options, extras).  Raises on unexpected
     shapes; the caller abandons the remainder of the section in that case.
+    ``section_context`` carries walk state (the current core module index)
+    into the per-entry records.
     """
     imports: List[dict[str, Any]] = []
     exports: List[dict[str, Any]] = []
     canon_opts: List[str] = []
     extras: dict[str, Any] = {"lift_count": 0, "lower_count": 0, "resource_count": 0}
+    if section_context:
+        extras.update(section_context)
 
     if section_id == 10:
         count = r.read_u32_leb()
@@ -384,16 +391,32 @@ def _decode_component_section(
             canon_kind = r.read_u8()
             if canon_kind == 0x00:  # lift
                 r.read_u8()  # 0x00 reserved
-                r.read_u32_leb()  # core func idx
+                core_func_idx = r.read_u32_leb()  # core func idx
                 opts = _read_canon_options(r)
-                r.read_u32_leb()  # type idx
+                type_idx = r.read_u32_leb()  # type idx
                 canon_opts.extend(opts)
                 extras["lift_count"] += 1
+                extras.setdefault("records", []).append(
+                    {
+                        "direction": "lift",
+                        "module": extras.get("current_core_module"),
+                        "func": core_func_idx,
+                        "type_index": type_idx,
+                    }
+                )
             elif canon_kind == 0x01:  # lower
                 r.read_u8()  # 0x00 reserved
-                r.read_u32_leb()  # func idx
+                lowered_func_idx = r.read_u32_leb()  # func idx
                 canon_opts.extend(_read_canon_options(r))
                 extras["lower_count"] += 1
+                extras.setdefault("records", []).append(
+                    {
+                        "direction": "lower",
+                        "module": extras.get("current_core_module"),
+                        "func": lowered_func_idx,
+                        "type_index": None,
+                    }
+                )
             elif canon_kind in (0x02, 0x03, 0x04):  # resource new/drop/rep
                 r.read_u32_leb()
                 extras["resource_count"] += 1
@@ -512,6 +535,7 @@ def parse_component_bytes(
     r = _CReader(data)
     r.offset = 8
     section_index = 0
+    extras_core_module = None
     while r.offset < r.size:
         try:
             section_id = r.read_u8()
@@ -541,6 +565,10 @@ def parse_component_bytes(
                 report = core_parse(payload)
                 report["core_module_index"] = len(result["core_modules"])
                 result["core_modules"].append(report)
+                # Canon entries that follow reference the most recent core
+                # module (the componentize layout order); recorded as an
+                # association approximation in the canon records.
+                extras_core_module = len(result["core_modules"]) - 1
             elif section_id == 4 and depth < _MAX_NESTING:
                 nested = parse_component_bytes(
                     payload, core_parse=core_parse, depth=depth + 1
@@ -549,8 +577,9 @@ def parse_component_bytes(
                 nested["core_module_index"] = None
                 result.setdefault("nested_components", []).append(nested)
             elif section_id in (8, 10, 11):
+                section_extras = {"current_core_module": extras_core_module}
                 imports, exports, canon_opts, extras = _decode_component_section(
-                    section_id, sub, len(payload)
+                    section_id, sub, len(payload), section_extras
                 )
                 result["imports"].extend(imports)
                 result["exports"].extend(exports)
@@ -566,6 +595,10 @@ def parse_component_bytes(
                     )
                     builtins[builtin_name] = (
                         builtins.get(builtin_name, 0) + builtin_count
+                    )
+                if extras.get("records"):
+                    result.setdefault("canon_records", []).extend(
+                        extras["records"]
                     )
             elif section_id == 0:
                 custom = _producers_and_features(payload)
@@ -664,6 +697,18 @@ def parse_component_bytes(
     result["import_count"] = len(result["imports"])
     result["export_count"] = len(result["exports"])
     result["core_module_count"] = len(result["core_modules"])
+
+    # (module_id, core func index) -> lifted type index: the component
+    # export surface mapping consumers can use for entry-point labeling.
+    result["exported_functions"] = [
+        {
+            "module": record.get("module"),
+            "func": record.get("func"),
+            "type_index": record.get("type_index"),
+        }
+        for record in result.get("canon_records", [])
+        if record.get("direction") == "lift"
+    ]
     return result
 
 

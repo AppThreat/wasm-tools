@@ -407,3 +407,69 @@ def test_component_composite_valuebound_skips_cleanly():
     assert report["is_component"] is True
     assert report["component"]["imports"][0]["valtype"] == "stream"
     assert report["errors"] == []
+
+
+# ─── Module-scoped component call graph (P04) ────────────────────────────────
+
+
+def _component_with_two_core_modules() -> bytes:
+    a = _core_fixture_bytes("simple_add.wasm")
+    b = _core_fixture_bytes("call_graph.wasm")
+    return _component(
+        [
+            _section(1, a),
+            _section(1, b),
+        ]
+    )
+
+
+def test_component_graph_nodes_carry_module_ids():
+    report = parse_wasm_bytes(_component_with_two_core_modules(), "two.wasm")
+    graph = report["call_graph"]
+    module_ids = {node.get("module_id") for node in graph["nodes"]}
+    assert {0, 1}.issubset(module_ids), "both modules contribute nodes"
+    # The flattened-index collision blint inherited is now disambiguated.
+    for edge in graph["edges"]:
+        assert "from_module" in edge and "to_module" in edge
+    identity_pairs = {
+        (node.get("module_id"), node.get("index")) for node in graph["nodes"]
+    }
+    assert len(identity_pairs) == len(graph["nodes"]), "node identity is unique"
+    assert graph["component_summary"]["module_count"] == 2
+
+
+def test_component_graph_per_module_reachability():
+    report = parse_wasm_bytes(_component_with_two_core_modules(), "two.wasm")
+    per_module = report["call_graph"]["reachability"]["per_module"]
+    assert "0" in per_module and "1" in per_module
+    assert per_module["0"]["reachable_count"] > 0
+
+
+def test_canon_lift_records_create_canon_edges():
+    core = _core_fixture_bytes("simple_add.wasm")
+    # One core module followed by a canon lift of its function 0 into
+    # component type 3.
+    canon = _section(8, _leb(1) + b"\x00\x00" + _leb(0) + _leb(0) + _leb(3))
+    report = parse_wasm_bytes(_component([_section(1, core), canon]), "lift.wasm")
+
+    graph = report["call_graph"]
+    canon_edges = [e for e in graph["edges"] if e["kind"] == "canon"]
+    assert len(canon_edges) == 1
+    edge = canon_edges[0]
+    assert edge["from"] == 0 and edge["from_module"] == 0
+    assert edge["to_module"] is None and edge["type_index"] == 3
+    synthetic = [n for n in graph["nodes"] if n.get("synthetic")]
+    assert synthetic and synthetic[0]["name"] == "component:type3"
+    assert graph["component_summary"]["canon_edge_count"] == 1
+    # The export surface mapping records the lift.
+    assert report["component"]["exported_functions"] == [
+        {"module": 0, "func": 0, "type_index": 3}
+    ]
+
+
+def test_single_module_core_reports_have_no_module_ids():
+    report = parse_wasm_bytes(_core_fixture_bytes("simple_add.wasm"), "s.wasm")
+    for node in report["call_graph"]["nodes"]:
+        assert "module_id" not in node
+    for edge in report["call_graph"]["edges"]:
+        assert "from_module" not in edge

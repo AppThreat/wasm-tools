@@ -279,3 +279,129 @@ def sample_paths(
         if len(out) >= max_paths:
             break
     return out
+
+
+def merge_component_graphs(
+    module_reports: Sequence[dict[str, Any]],
+    canon_wiring: Sequence[dict[str, Any]],
+    max_edges: int = DEFAULT_MAX_EDGES,
+) -> dict[str, Any]:
+    """Merge per-core-module call graphs into a module-scoped component graph.
+
+    Flattened function indices collide across core modules (module 0 and
+    module 1 both have a function index 0), so every node carries
+    ``module_id`` and every edge carries ``from_module``/``to_module``; the
+    node identity consumers should key on is ``(module_id, index)``.
+    ``canon_wiring`` entries describe canon lift/lower records already
+    decoded from the component canon section:
+    ``{"module": int, "func": int, "type_index": int, "direction":
+    "lift"|"lower"}``. Each record becomes a ``canon`` edge between the core
+    function and a synthetic ``component:type<N>`` node: provable from the
+    canon section itself, though the interface NAME behind ``type_index``
+    needs instance and alias section decoding (a documented follow-up), so
+    cross-module interface wiring is intentionally absent rather than
+    guessed.
+
+    Each module keeps its own ``reachability`` block, keyed by module id, so
+    per-module dead-code analysis stays exact; the component-level summary
+    counts nodes, edges, and canon edges.
+    """
+    nodes: List[dict[str, Any]] = []
+    edges: List[dict[str, Any]] = []
+    import_xrefs: List[dict[str, Any]] = []
+    reachability: Dict[str, Any] = {}
+    edge_count = 0
+    truncated = False
+
+    for module_id, report in enumerate(module_reports):
+        graph = report.get("call_graph") or {}
+        for node in graph.get("nodes", []):
+            entry = dict(node)
+            entry["module_id"] = module_id
+            nodes.append(entry)
+        for edge in graph.get("edges", []):
+            entry = dict(edge)
+            entry["from_module"] = module_id
+            entry["to_module"] = module_id
+            edges.append(entry)
+            edge_count += 1
+        for xref in graph.get("import_xrefs", []):
+            entry = dict(xref)
+            entry["module_id"] = module_id
+            import_xrefs.append(entry)
+        reach = graph.get("reachability") or {}
+        if reach:
+            reachability[str(module_id)] = reach
+        truncated = truncated or bool(graph.get("truncated"))
+        edge_count = min(edge_count, max_edges)
+
+    # Canon wiring: synthetic interface nodes per distinct type index.
+    canon_type_nodes: Dict[int, int] = {}
+    for record in canon_wiring:
+        type_index = int(record.get("type_index", -1))
+        if type_index not in canon_type_nodes:
+            synthetic_index = 10_000_000 + type_index
+            canon_type_nodes[type_index] = synthetic_index
+            nodes.append(
+                {
+                    "index": synthetic_index,
+                    "name": f"component:type{type_index}",
+                    "imported": True,
+                    "exported": False,
+                    "module_id": None,
+                    "synthetic": True,
+                }
+            )
+        target = canon_type_nodes[type_index]
+        direction = str(record.get("direction", "lift"))
+        module_id = record.get("module")
+        if direction == "lift":
+            edges.append(
+                {
+                    "from": record.get("func"),
+                    "from_module": module_id,
+                    "to": target,
+                    "to_module": None,
+                    "kind": "canon",
+                    "offset": None,
+                    "type_index": type_index,
+                }
+            )
+        else:
+            edges.append(
+                {
+                    "from": target,
+                    "from_module": None,
+                    "to": record.get("func"),
+                    "to_module": module_id,
+                    "kind": "canon",
+                    "offset": None,
+                    "type_index": type_index,
+                }
+            )
+            edge_count += 1
+
+    canon_edge_count = sum(1 for e in edges if e.get("kind") == "canon")
+    return {
+        "node_count": len(nodes),
+        "edge_count": edge_count + canon_edge_count,
+        "truncated": truncated,
+        "nodes": nodes,
+        "edges": edges,
+        "import_xrefs": import_xrefs,
+        "reachability": {
+            "per_module": reachability,
+            "roots": [],
+            "reachable_functions": sum(
+                r.get("reachable_count", 0) for r in reachability.values()
+            ),
+            "unreachable_functions": sum(
+                r.get("unreachable_count", 0) for r in reachability.values()
+            ),
+        },
+        "component_summary": {
+            "module_count": len(module_reports),
+            "canon_edge_count": canon_edge_count,
+            "canon_type_nodes": len(canon_type_nodes),
+        },
+    }
