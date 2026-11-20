@@ -1,0 +1,37 @@
+wasm_tools/customsections.py
+  s_7318da1b9edd46::t_dcd6ee4f57b29d 25-26,360-367,371-376
+  s_7318da1b9edd46::t_4b529b41990858 77,338-341
+  s_7318da1b9edd46::t_338b8dbc66b60a 250-257,270-274,276-277,288-289,292-295,297-299,302-304,342-344,346-347,351
+docs/CUSTOM_SECTIONS.md
+  s_7318da1b9edd46::t_71f73f64345602 54
+wasm_tools/carve.py
+  s_7318da1b9edd46::t_1e18325d8a21c0 78,155-159,162-164
+  s_7318da1b9edd46::t_2b89c20ab7fb34 53-57
+tests/test_customsections.py
+  s_7318da1b9edd46::t_e7c278dd57eea7 7-8,160-185,258-263,265
+tests/test_carve.py
+  s_7318da1b9edd46::t_e7c278dd57eea7 96-108
+tests/test_provenance.py
+  s_7318da1b9edd46::t_33416719094880 37,40-44,105-168,214-215,220-249
+  s_7318da1b9edd46::t_74e00609a68668 250-251
+wasm_tools/demangle.py
+  s_7318da1b9edd46::t_80920baeef45f3 30-36,48,98,130,140-141,150
+wasm_tools/provenance.py
+  s_7318da1b9edd46::t_b704ca524f9d6f 24,27-29,171-173,179,183,207-208,210-213,215-216,232-233,235-236
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "ccd59868fb7451016e7c2f3e8d21439f88cd3b4f",
+  "prompts": {},
+  "sessions": {
+    "s_7318da1b9edd46": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ec4cd02e-10f8-411b-a4d1-40ff6af5049b",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  }
+}
