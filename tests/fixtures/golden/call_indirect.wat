@@ -14,5 +14,5 @@
   )
   (table (;0;) i32 2 funcref)
   (export "apply" (func 2))
-  (elem (;0;) (table 0) (i32.const 0) func 0 1)
+  (elem (;0;) (i32.const 0) func 0 1)
 )
