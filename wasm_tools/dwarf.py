@@ -32,7 +32,6 @@ from typing import Any, Optional
 # than ballooning the report process).
 MAX_DWARF_RETENTION = 8 * 1024 * 1024
 
-_STANDARD_OPCODE_LENGTHS_V2 = 12  # opcode_base for the DWARF 2/3 default
 
 
 class _DwarfParseError(Exception):
@@ -112,6 +111,13 @@ class _Reader:
             raise _DwarfParseError("reserved initial length")
         return value, self.offset
 
+    def read_offset(self, size: int) -> int:
+        """A section offset or length field: 4 bytes, or 8 in 64-bit DWARF."""
+        self.ensure(size)
+        value = int.from_bytes(self.data[self.offset : self.offset + size], "little")
+        self.offset += size
+        return value
+
     def _read_u64(self) -> int:
         self.ensure(8)
         value = int.from_bytes(self.data[self.offset : self.offset + 8], "little")
@@ -119,199 +125,227 @@ class _Reader:
         return value
 
 
+#: Most line rows kept per module; a hostile or huge table stops here and
+#: the result says ``truncated``.
+MAX_LINE_ROWS = 500_000
+
+# DW_LNCT content types and DW_FORM codes used by v5 entry formats.
+_LNCT_PATH = 0x1
+_LNCT_DIRECTORY_INDEX = 0x2
+_FORM_BLOCK = 0x09
+_FORM_DATA1 = 0x0B
+_FORM_DATA2 = 0x05
+_FORM_DATA4 = 0x06
+_FORM_DATA8 = 0x07
+_FORM_DATA16 = 0x1E
+_FORM_LINE_STRP = 0x1F
+_FORM_STRING = 0x08
+_FORM_STRP = 0x0E
+_FORM_UDATA = 0x0F
+
+
 def parse_line_program(
     payload: bytes,
     line_str: Optional[bytes] = None,
     debug_str: Optional[bytes] = None,
+    max_rows: int = MAX_LINE_ROWS,
 ) -> Optional[dict[str, Any]]:
-    """Parse one ``.debug_line`` line program into rows and the file table.
+    """Parse every line-program unit of a ``.debug_line`` payload.
 
-    Returns ``{"rows": [{"address", "file", "line"}, ...], "files":
-    [{"index", "path"}], "version": v}`` or None when the payload does not
-    parse. Rows are emitted in program order; addresses advance
-    monotonically within a sequence and reset at end_sequence markers.
+    Returns ``{"version": v, "units": n, "files": [{"unit", "index",
+    "path"}], "rows": [{"address", "file", "line"}], "truncated": bool}``
+    or None when the first unit does not parse. ``version`` is the first
+    unit's. Row ``file`` is the resolved path, since file indices are only
+    meaningful inside their unit; the row that closes a sequence carries
+    ``"end_sequence": True`` and marks the first address past it. A later
+    unit that fails to parse ends the walk and keeps the rows before it.
+    Wasm has no VLIW bundles, so ``maximum_operations_per_instruction`` is
+    treated as one.
     """
-    try:
-        reader = _Reader(payload)
-        unit_length, after_length = reader.read_initial_length()
-        program_end = after_length + unit_length
-        if program_end > reader.size:
-            raise _DwarfParseError("unit length exceeds payload")
-        version = reader.read_u16()
-        if version < 2 or version > 5:
-            raise _DwarfParseError(f"unsupported DWARF version {version}")
+    reader = _Reader(payload)
+    result: dict[str, Any] = {
+        "version": None,
+        "units": 0,
+        "files": [],
+        "rows": [],
+        "truncated": False,
+    }
+    while reader.offset < reader.size:
+        try:
+            unit = _parse_unit(reader, line_str, debug_str, result, max_rows)
+        except _DwarfParseError:
+            if result["units"] == 0:
+                return None
+            break
+        if unit is None:
+            break
+        result["units"] += 1
+        if result["version"] is None:
+            result["version"] = unit
+        if result["truncated"]:
+            break
+    if result["units"] == 0:
+        return None
+    return result
 
-        if version <= 4:
-            header_length = reader.read_u32()
-        else:
-            address_size = reader.read_u8()
-            segment_selector_size = reader.read_u8()
-            header_length = reader.read_u32()
-        # DWARF: header_length counts from just after the header_length field
-        # (where reader.offset sits now) to the start of the line program.
-        program_start = reader.offset + header_length
-        if program_start > program_end:
-            raise _DwarfParseError("header length exceeds unit")
 
-        minimum_instruction_length = reader.read_u8()
-        maximum_operations = reader.read_u8() if version >= 4 else 1
-        default_is_stmt = reader.read_u8()
-        line_base = reader.read_s8()
-        line_range = reader.read_u8()
-        opcode_base = reader.read_u8()
-        if opcode_base < 1:
-            raise _DwarfParseError("opcode base must be positive")
-        standard_lengths = [reader.read_u8() for _ in range(opcode_base - 1)]
+def _parse_unit(
+    reader: _Reader,
+    line_str: Optional[bytes],
+    debug_str: Optional[bytes],
+    result: dict[str, Any],
+    max_rows: int,
+) -> Optional[int]:
+    """Parse one unit at ``reader.offset``, appending its files and rows to
+    ``result``; returns the unit's version, None for a zero-length tail."""
+    unit_start = reader.offset
+    unit_length, after_length = reader.read_initial_length()
+    if unit_length == 0:
+        return None
+    # 64-bit DWARF: a 12-byte initial length, and 8-byte offset fields.
+    offset_size = 8 if after_length - unit_start == 12 else 4
+    program_end = after_length + unit_length
+    if program_end > reader.size:
+        raise _DwarfParseError("unit length exceeds payload")
+    unit_index = result["units"]
+    version = reader.read_u16()
+    if version < 2 or version > 5:
+        raise _DwarfParseError(f"unsupported DWARF version {version}")
+    if version >= 5:
+        reader.read_u8()  # address_size
+        reader.read_u8()  # segment_selector_size
+    header_length = reader.read_offset(offset_size)
+    # header_length counts from just after the field to the program start.
+    program_start = reader.offset + header_length
+    if program_start > program_end:
+        raise _DwarfParseError("header length exceeds unit")
+    minimum_instruction_length = reader.read_u8()
+    if version >= 4:
+        reader.read_u8()  # maximum_operations_per_instruction
+    reader.read_u8()  # default_is_stmt
+    line_base = reader.read_s8()
+    line_range = reader.read_u8()
+    opcode_base = reader.read_u8()
+    if opcode_base < 1:
+        raise _DwarfParseError("opcode base must be positive")
+    if line_range == 0:
+        raise _DwarfParseError("line range must be positive")
+    standard_lengths = [reader.read_u8() for _ in range(opcode_base - 1)]
 
-        # File table from the header (format differs by version).
+    paths: dict[int, str] = {}
+    if version <= 4:
+        # v2-v4: directory 0 and file 0 are implicit; tables are 1-based.
         directories: list[str] = []
-        files: list[dict[str, Any]] = []
-        if version <= 4:
-            while True:
-                directory = reader.read_cstr()
-                if directory == "":
-                    break
-                directories.append(directory)
-            file_index = 1
-            while True:
-                name = reader.read_cstr()
-                if name == "":
-                    break
-                directory_index = reader.read_uleb()
-                reader.read_uleb()  # mtime
-                reader.read_uleb()  # length
-                path = _compose_path(name, directory_index, directories)
-                files.append({"index": file_index, "path": path})
-                file_index += 1
-        else:
-            dir_format_count = reader.read_u8()
-            dir_formats = [
-                (reader.read_uleb(), reader.read_uleb())
-                for _ in range(dir_format_count)
-            ]
-            dir_count = reader.read_uleb()
-            for _ in range(dir_count):
-                directories.append(
-                    _read_v5_entry(reader, dir_formats, line_str, debug_str)
-                )
-            file_format_count = reader.read_u8()
-            file_formats = [
-                (reader.read_uleb(), reader.read_uleb())
-                for _ in range(file_format_count)
-            ]
-            file_count = reader.read_uleb()
-            for index in range(file_count):
-                entries = [
-                    _read_v5_entry(reader, file_formats, line_str, debug_str)
-                    for _ in range(file_formats)
-                ]
-                # DW_LNCT_path = 1 is the file name; directory_index = 2.
-                name = entries[0] if entries else ""
-                directory_index = entries[1] if len(entries) > 1 else 0
-                directory = ""
-                if isinstance(directory_index, int) and 1 <= directory_index <= len(
-                    directories
-                ):
-                    directory = directories[directory_index - 1]
-                files.append(
-                    {
-                        "index": index + 1
-                        if version == 5
-                        else index,
-                        "path": _compose_path(name, directory, directories),
-                    }
-                )
-            # v5 file indices are zero-based relative to the primary source
-            # file; rows carry them verbatim.
-
-        # The line program proper.
-        reader.offset = program_start
-        rows: list[dict[str, int]] = []
-        address = 0
+        while True:
+            directory = reader.read_cstr()
+            if directory == "":
+                break
+            directories.append(directory)
         file_index = 1
-        line = 1
-        minimum_instruction = minimum_instruction_length
-        maximum_ops = maximum_operations or 1
+        while True:
+            name = reader.read_cstr()
+            if name == "":
+                break
+            directory_index = reader.read_uleb()
+            reader.read_uleb()  # mtime
+            reader.read_uleb()  # length
+            paths[file_index] = _join_path(_v4_directory(directories, directory_index), name)
+            file_index += 1
+    else:
+        # v5: directory 0 is the compilation directory and file indices are
+        # zero-based; both tables are described by entry format lists.
+        dir_formats = _read_formats(reader)
+        directories = [
+            str(_read_v5_entry(reader, dir_formats, line_str, debug_str, offset_size).get(_LNCT_PATH, ""))
+            for _ in range(reader.read_uleb())
+        ]
+        file_formats = _read_formats(reader)
+        for index in range(reader.read_uleb()):
+            entry = _read_v5_entry(reader, file_formats, line_str, debug_str, offset_size)
+            name = str(entry.get(_LNCT_PATH, ""))
+            directory_index = entry.get(_LNCT_DIRECTORY_INDEX, 0)
+            directory = (
+                directories[directory_index]
+                if isinstance(directory_index, int) and 0 <= directory_index < len(directories)
+                else ""
+            )
+            paths[index] = _join_path(directory, name)
+    for index, path in paths.items():
+        result["files"].append({"unit": unit_index, "index": index, "path": path})
 
-        def emit_row() -> None:
-            rows.append({"address": address, "file": file_index, "line": line})
+    rows = result["rows"]
+    reader.offset = program_start
+    address = 0
+    file_index = 1
+    line = 1
 
+    def emit(end_sequence: bool = False) -> None:
+        if len(rows) >= max_rows:
+            result["truncated"] = True
+            raise _StopProgram
+        row: dict[str, Any] = {"address": address, "file": paths.get(file_index, ""), "line": line}
+        if end_sequence:
+            row["end_sequence"] = True
+        rows.append(row)
+
+    try:
         while reader.offset < program_end:
             opcode = reader.read_u8()
             if opcode >= opcode_base:
-                # Special opcode: advance address and line, emit a row.
                 adjusted = opcode - opcode_base
-                operation_advance = adjusted // line_range
-                address += (
-                    minimum_instruction
-                    * ((operation_advance * maximum_ops) + (adjusted % line_range) % maximum_ops)
-                )
+                address += minimum_instruction_length * (adjusted // line_range)
                 line += line_base + (adjusted % line_range)
-                emit_row()
+                emit()
             elif opcode == 0x00:
-                # Extended opcode.
                 length = reader.read_uleb()
                 extended_end = reader.offset + length
-                if extended_end > program_end:
+                if length == 0 or extended_end > program_end:
                     raise _DwarfParseError("extended opcode exceeds program")
                 sub_opcode = reader.read_u8()
                 if sub_opcode == 0x01:  # end_sequence
-                    emit_row()
+                    emit(end_sequence=True)
                     address = 0
                     file_index = 1
                     line = 1
                 elif sub_opcode == 0x02:  # set_address
-                    width = extended_end - reader.offset
-                    address = int.from_bytes(
-                        reader.data[reader.offset : extended_end], "little"
-                    )
-                    reader.offset = extended_end
-                elif sub_opcode == 0x03:  # define_file
+                    address = int.from_bytes(reader.data[reader.offset : extended_end], "little")
+                elif sub_opcode == 0x03 and version <= 4:  # define_file
                     name = reader.read_cstr()
                     directory_index = reader.read_uleb()
-                    reader.read_uleb()
-                    reader.read_uleb()
-                    files.append(
-                        {
-                            "index": len(files) + 1,
-                            "path": _compose_path(
-                                name, directory_index, directories
-                            ),
-                        }
-                    )
-                else:  # set_discriminator and friends: skip
-                    reader.offset = extended_end
+                    new_index = max(paths, default=0) + 1
+                    paths[new_index] = _join_path(_v4_directory(directories, directory_index), name)
+                    result["files"].append({"unit": unit_index, "index": new_index, "path": paths[new_index]})
+                reader.offset = extended_end
             elif opcode == 0x01:  # copy
-                emit_row()
+                emit()
             elif opcode == 0x02:  # advance_pc
-                address += reader.read_uleb() * minimum_instruction
+                address += reader.read_uleb() * minimum_instruction_length
             elif opcode == 0x03:  # advance_line
                 line += reader.read_sleb()
             elif opcode == 0x04:  # set_file
                 file_index = reader.read_uleb()
-            elif opcode == 0x05:  # set_column
-                reader.read_uleb()
-            elif opcode == 0x06:  # negate_stmt
-                pass
-            elif opcode == 0x07:  # set_basic_block
-                pass
             elif opcode == 0x08:  # const_add_pc
-                adjusted = 255 - opcode_base
-                operation_advance = adjusted // line_range
-                address += (
-                    minimum_instruction
-                    * ((operation_advance * maximum_ops) + (adjusted % line_range) % maximum_ops)
-                )
+                address += minimum_instruction_length * ((255 - opcode_base) // line_range)
             elif opcode == 0x09:  # fixed_advance_pc
                 address += reader.read_u16()
-            elif opcode in (0x0A, 0x0B, 0x0C):  # prologue/epilogue/isa
-                reader.read_uleb()
             else:
-                raise _DwarfParseError(f"unknown standard opcode {opcode:#x}")
+                # set_column, negate_stmt, set_basic_block, prologue_end,
+                # epilogue_begin, set_isa and any later standard opcode:
+                # skip the ULEB operands the header declares for it.
+                for _ in range(standard_lengths[opcode - 1]):
+                    reader.read_uleb()
+    except _StopProgram:
+        pass
+    reader.offset = program_end
+    return version
 
-        return {"rows": rows, "files": files, "version": version}
-    except _DwarfParseError:
-        return None
+
+class _StopProgram(Exception):
+    """Raised by the row emitter when the row cap is reached."""
+
+
+def _read_formats(reader: _Reader) -> list[tuple[int, int]]:
+    return [(reader.read_uleb(), reader.read_uleb()) for _ in range(reader.read_u8())]
 
 
 def _read_v5_entry(
@@ -319,44 +353,40 @@ def _read_v5_entry(
     formats: list[tuple[int, int]],
     line_str: Optional[bytes],
     debug_str: Optional[bytes],
-) -> Any:
-    """Read one v5 directory/file entry per its format list.
-
-    Content types (DW_LNCT_*): path=1, directory_index=2, timestamp=3,
-    size=4, MD5=5. Forms: string=0x08, line_strp=0x1f, strp=0x0e, udata=0x07,
-    data1=0x0b, data2=0x05, data4=0x06, data8=0x07? (data8=0x07 collides
-    with udata in the numbering; the DWARF 5 spec forms used here are the
-    ones clang emits for wasm).
-    """
-    values: list[Any] = []
+    offset_size: int,
+) -> dict[int, Any]:
+    """Read one v5 directory or file entry: ``{content type: value}``."""
+    values: dict[int, Any] = {}
     for content_type, form in formats:
-        if form == 0x08:  # DW_FORM_string
-            values.append(reader.read_cstr())
-        elif form == 0x1F:  # DW_FORM_line_strp
-            offset = reader.read_u32()
-            values.append(_string_at(line_str, offset))
-        elif form == 0x0E:  # DW_FORM_strp
-            offset = reader.read_u32()
-            values.append(_string_at(debug_str, offset))
-        elif form == 0x07:  # DW_FORM_udata (also data8 in some tables)
-            values.append(reader.read_uleb())
-        elif form == 0x0B:  # DW_FORM_data1
-            values.append(reader.read_u8())
-        elif form == 0x05:  # DW_FORM_data2
-            values.append(reader.read_u16())
-        elif form == 0x06:  # DW_FORM_data4
-            values.append(reader.read_u32())
-        elif form == 0x1E:  # DW_FORM_data16 (MD5): skip 16 bytes
+        if form == _FORM_STRING:
+            value: Any = reader.read_cstr()
+        elif form == _FORM_LINE_STRP:
+            value = _string_at(line_str, reader.read_offset(offset_size))
+        elif form == _FORM_STRP:
+            value = _string_at(debug_str, reader.read_offset(offset_size))
+        elif form == _FORM_UDATA:
+            value = reader.read_uleb()
+        elif form == _FORM_DATA1:
+            value = reader.read_u8()
+        elif form == _FORM_DATA2:
+            value = reader.read_u16()
+        elif form == _FORM_DATA4:
+            value = reader.read_u32()
+        elif form == _FORM_DATA8:
+            value = reader.read_offset(8)
+        elif form == _FORM_DATA16:
             reader.ensure(16)
             reader.offset += 16
-            values.append("")
+            value = None
+        elif form == _FORM_BLOCK:
+            length = reader.read_uleb()
+            reader.ensure(length)
+            reader.offset += length
+            value = None
         else:
             raise _DwarfParseError(f"unsupported v5 form {form:#x}")
-    # Return the value for the content type callers care about first; for
-    # path entries that is values[0], for directory_index values[0] as int.
-    if values and isinstance(values[0], int):
-        return values[0]
-    return values[0] if values else ""
+        values[content_type] = value
+    return values
 
 
 def _string_at(payload: Optional[bytes], offset: int) -> str:
@@ -368,16 +398,20 @@ def _string_at(payload: Optional[bytes], offset: int) -> str:
     return payload[offset:end].decode("utf-8", errors="replace")
 
 
-def _compose_path(name, directory_index, directories) -> str:
-    if isinstance(directory_index, str):
-        # v5 directory entries resolved inline.
-        return directory_index if not name else directory_index
-    directory = ""
-    if isinstance(directory_index, int) and 1 <= directory_index <= len(directories):
-        directory = directories[directory_index - 1]
-    if directory and name:
-        return f"{directory}/{name}"
-    return name or ""
+def _v4_directory(directories: list[str], directory_index: int) -> str:
+    # Index 0 is the compilation directory, which the v4 header does not
+    # name, so such a file keeps its bare name.
+    if 1 <= directory_index <= len(directories):
+        return directories[directory_index - 1]
+    return ""
+
+
+def _join_path(directory: str, name: str) -> str:
+    if not name:
+        return ""
+    if not directory or name.startswith("/"):
+        return name
+    return f"{directory.rstrip('/')}/{name}"
 
 
 def map_function_sources(
@@ -386,44 +420,40 @@ def map_function_sources(
 ) -> dict[int, dict[str, Any]]:
     """Map (function index, code-relative address) pairs to source locations.
 
-    Uses the last row at or before the function's address, per sequence:
-    rows are grouped by end_sequence markers and each sequence is searched
-    independently so an address never maps across a sequence boundary.
+    Rows are split into sequences at their end_sequence rows. A function maps
+    only when its address lies inside a sequence (at or after its first row
+    and before its end row), to the last row at or before the address. An
+    address outside every sequence, or whose row names no file, gets no
+    mapping. Sequences are indexed once, so the cost is
+    O((rows + functions) log rows).
     """
-    rows = line_table.get("rows") or []
-    files = {f["index"]: f["path"] for f in line_table.get("files") or []}
-
-    # Split rows into sequences at end_sequence markers (the parser records
-    # the reset implicitly; sequences are contiguous ascending runs).
-    sequences: list[list[dict[str, int]]] = []
-    current: list[dict[str, int]] = []
-    previous_address: Optional[int] = None
-    for row in rows:
-        if previous_address is not None and row["address"] < previous_address:
-            sequences.append(current)
+    sequences: list[tuple[int, int, list[int], list[dict[str, Any]]]] = []
+    current: list[dict[str, Any]] = []
+    for row in line_table.get("rows") or []:
+        if row.get("end_sequence"):
+            if current:
+                addresses = [r["address"] for r in current]
+                if addresses == sorted(addresses):
+                    sequences.append((addresses[0], row["address"], addresses, current))
             current = []
-        current.append(row)
-        previous_address = row["address"]
-    if current:
-        sequences.append(current)
+        else:
+            current.append(row)
+    sequences.sort(key=lambda seq: seq[0])
+    starts = [seq[0] for seq in sequences]
 
     sources: dict[int, dict[str, Any]] = {}
     for function_index, code_address in function_addresses:
-        best: Optional[dict[str, int]] = None
-        for sequence in sequences:
-            addresses = [row["address"] for row in sequence]
-            position = bisect.bisect_right(addresses, code_address)
-            if position == 0:
-                continue
-            candidate = sequence[position - 1]
-            if best is None or candidate["address"] > best["address"]:
-                best = candidate
-        if best is None:
-            continue
-        path = files.get(best["file"], "")
-        if not path:
-            continue
-        sources[function_index] = {"file": path, "line": best["line"]}
+        position = bisect.bisect_right(starts, code_address) - 1
+        # Sequences may overlap; walk back over those that start at or
+        # before the address until one contains it.
+        while position >= 0:
+            start, end, addresses, seq_rows = sequences[position]
+            if start <= code_address < end:
+                row = seq_rows[bisect.bisect_right(addresses, code_address) - 1]
+                if row["file"]:
+                    sources[function_index] = {"file": row["file"], "line": row["line"]}
+                break
+            position -= 1
     return sources
 
 

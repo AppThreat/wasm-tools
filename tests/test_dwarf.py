@@ -142,12 +142,17 @@ def test_parse_v4_line_table_rows():
     rows = table["rows"]
     # Hand-derived: the initial copy row at address 0, then (100, file 2,
     # line 11), (101, 2, 12), (151, 1, -8), and the end_sequence row at
-    # (201, 1, -8).
-    assert rows[0] == {"address": 0, "file": 1, "line": 1}
-    assert rows[1] == {"address": 100, "file": 2, "line": 11}
-    assert rows[2] == {"address": 101, "file": 2, "line": 12}
-    assert rows[3] == {"address": 151, "file": 1, "line": -8}
-    assert rows[-1]["address"] == 201
+    # (201, 1, -8). Rows carry the resolved path.
+    assert rows[0] == {"address": 0, "file": "/src/benchmark.c", "line": 1}
+    assert rows[1] == {"address": 100, "file": "/src/helper.c", "line": 11}
+    assert rows[2] == {"address": 101, "file": "/src/helper.c", "line": 12}
+    assert rows[3] == {"address": 151, "file": "/src/benchmark.c", "line": -8}
+    assert rows[-1] == {
+        "address": 201,
+        "file": "/src/benchmark.c",
+        "line": -8,
+        "end_sequence": True,
+    }
 
 
 def test_map_function_sources():
@@ -160,9 +165,9 @@ def test_map_function_sources():
     assert sources[1] == {"file": "/src/helper.c", "line": 11}
     assert sources[2] == {"file": "/src/helper.c", "line": 12}
     assert sources[3] == {"file": "/src/benchmark.c", "line": -8}
-    # 250 is past the end_sequence reset: the last row's address (201) is
-    # still the best candidate in its sequence.
-    assert sources[4] == {"file": "/src/benchmark.c", "line": -8}
+    # 250 lies past the sequence's end (201), so it maps to nothing rather
+    # than to the last row before the end.
+    assert 4 not in sources
 
 
 def test_line_program_truncated_returns_none():
@@ -265,3 +270,48 @@ def test_end_to_end_function_source_mapping():
     # The function's code-relative address is 0, which the table's first
     # row (the post-set_address copy) maps to benchmark.c line 1.
     assert fn.get("source") == {"file": "/src/benchmark.c", "line": 1}
+
+
+def _clang_sources(name):
+    report = parse_wasm_bytes(open(os.path.join(FIXTURES_DIR, name), "rb").read(), name)
+    assert report["errors"] == []
+    return {fn["name"]: fn.get("source") for fn in report["functions"]}
+
+
+def test_clang_dwarf4_two_units_map_to_their_own_files():
+    # dwarf_v4_two_units.wasm: a.c and b.c (kept here as dwarf_a.c and
+    # dwarf_b.c) built with
+    # `clang --target=wasm32 -g -gdwarf-4 -O0 -nostdlib -fdebug-prefix-map=$PWD=/src -Wl,--no-entry
+    # -Wl,--export-all`. Expected lines are llvm-dwarfdump's DW_AT_decl_line
+    # and line rows at each DW_AT_low_pc: add a.c:1, mul a.c:3, sq b.c:2.
+    # The second unit (b.c) is only reachable by walking every unit, and
+    # clang's prologue_end opcodes take no operands, so a parser that reads
+    # one would desynchronise and get these wrong.
+    sources = _clang_sources("dwarf_v4_two_units.wasm")
+    assert sources["add"]["line"] == 1 and sources["add"]["file"].endswith("a.c")
+    assert sources["mul"]["line"] == 3 and sources["mul"]["file"].endswith("a.c")
+    assert sources["sq"]["line"] == 2 and sources["sq"]["file"].endswith("b.c")
+
+
+def test_clang_dwarf5_two_units_map_to_their_own_files():
+    # The same sources with -gdwarf-5: zero-based file indices, directory 0
+    # as the compilation directory, and line_strp entry forms.
+    sources = _clang_sources("dwarf_v5_two_units.wasm")
+    assert sources["add"]["line"] == 1 and sources["add"]["file"].endswith("a.c")
+    assert sources["mul"]["line"] == 3 and sources["mul"]["file"].endswith("a.c")
+    assert sources["sq"]["line"] == 2 and sources["sq"]["file"].endswith("b.c")
+
+
+def test_line_range_zero_is_rejected_not_divided_by():
+    table = bytearray(_build_v4_line_table())
+    # line_range is the byte after line_base in the v4 header: unit_length
+    # (4), version (2), header_length (4), min_inst, max_ops,
+    # default_is_stmt, line_base, then line_range at offset 14.
+    table[14] = 0
+    assert parse_line_program(bytes(table)) is None
+
+
+def test_row_cap_truncates():
+    table = parse_line_program(_build_v4_line_table(), max_rows=2)
+    assert table["truncated"] is True
+    assert len(table["rows"]) == 2
