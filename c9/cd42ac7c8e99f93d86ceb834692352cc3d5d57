@@ -1,0 +1,33 @@
+tests/fixtures/import_calls.wat
+  s_f313f304041c9f::t_e0814054df966a 1-17,21-24
+  s_f313f304041c9f::t_23691f1d320fca 18-20
+tests/fixtures/duplicate_bodies.wat
+  s_f313f304041c9f::t_f168ac3745868e 1-20
+wasm_tools/api.py
+  s_f313f304041c9f::t_aa27cdac2ab4f6 689
+  s_f313f304041c9f::t_fed93c64346a97 5
+  s_f313f304041c9f::t_0f029a585188eb 688,690-699
+  s_f313f304041c9f::t_942bb437439bb7 512-539,545-564,568,578,586-619
+  s_f313f304041c9f::t_e8abba1b3287d1 620
+tests/test_json_api.py
+  s_f313f304041c9f::t_1ceb5344697925 967-969
+  s_f313f304041c9f::t_f168ac3745868e 875-930,934-937,942-960,970-974,981-993
+  s_f313f304041c9f::t_e0814054df966a 961-966,975-980
+  s_f313f304041c9f::t_e9025aa9270027 931-933,938-941
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "c9cd42ac7c8e99f93d86ceb834692352cc3d5d57",
+  "prompts": {},
+  "sessions": {
+    "s_f313f304041c9f": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "sess_02a3d826-3148-4c5e-a179-e38422bb7d90",
+        "model": "GLM-5.3"
+      },
+      "human_author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  }
+}
