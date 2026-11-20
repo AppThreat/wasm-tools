@@ -237,6 +237,7 @@ def _run_text_mode(path: str, args: argparse.Namespace, options: ObjdumpOptions)
         "instruction_budget": args.instruction_budget,
         "include_instructions": not args.no_instructions,
         "include_demangled": not args.no_demangle,
+        "include_features": not args.no_features,
     }
 
     if args.strings or args.calls or is_component:
@@ -405,6 +406,11 @@ def main() -> None:
         help="Skip call graph construction in --json reports",
     )
     parser.add_argument(
+        "--no-features",
+        action="store_true",
+        help="Skip the analysis.features opcode statistics block in --json reports",
+    )
+    parser.add_argument(
         "--no-demangle",
         action="store_true",
         help="Skip Rust/C++ demangling of name-section symbols",
@@ -506,6 +512,7 @@ def main() -> None:
                 "instruction_budget": args.instruction_budget,
                 "include_instructions": not args.no_instructions,
                 "include_demangled": not args.no_demangle,
+                "include_features": not args.no_features,
             })
             output = report["analysis"] if args.analysis_only else report
             outputs.append(json.dumps(output, ensure_ascii=False, separators=(",", ":")))

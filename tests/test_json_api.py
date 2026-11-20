@@ -1160,6 +1160,7 @@ def test_finding_vocabulary_and_evidence_registry_across_fixtures():
         "simd_basic.wasm",
         "js_deopt_surface.wasm",
         "call_indirect.wasm",
+        "miner_shaped.wasm",
         "corpus/bz2.wasm",
         "corpus/erc20.wasm",
     ]
@@ -1222,3 +1223,104 @@ def test_report_contract_version_present():
         + bytes([1]) + _leb(len(core)) + core
     )
     assert parse_wasm_bytes(component, "c.wasm")["report_contract"] == "wasm-tools/2"
+
+
+# ─── Opcode features and the mining heuristic (P06) ──────────────────────────
+
+
+def test_features_block_deterministic_and_exact():
+    raw = _fixture_bytes("simple_add.wasm")
+    first = parse_wasm_bytes(raw, "s.wasm")
+    second = parse_wasm_bytes(raw, "s.wasm")
+    assert first["analysis"]["features"] == second["analysis"]["features"]
+    features = first["analysis"]["features"]
+    # Hand-computed: the fixture is local.get 0 / i32.const 1 / i32.add per
+    # function plus one i32.const export expression... verify the total
+    # matches the emitted instruction counts exactly.
+    total_instructions = sum(fn["instruction_count"] for fn in first["functions"])
+    assert features["histogram_total"] == total_instructions
+    assert features["prefix_counts"]["core"] == total_instructions
+    assert "i32.add" in features["opcode_histogram"]
+
+
+def test_features_budget_invariant():
+    raw = _fixture_bytes("dos_growth_loop.wasm")
+    full = parse_wasm_bytes(raw, "m.wasm")
+    budgeted = parse_wasm_bytes(raw, "m.wasm", instruction_budget=5)
+    assert full["analysis"]["features"] == budgeted["analysis"]["features"]
+
+
+def test_features_opt_out():
+    raw = _fixture_bytes("simple_add.wasm")
+    report = parse_wasm_bytes(raw, "s.wasm", include_features=False)
+    assert "features" not in report["analysis"]
+    assert "features_block" not in report["analysis"]
+
+
+def test_prefix_counts_use_the_opcode_table_families():
+    raw = _fixture_bytes("simd_basic.wasm")
+    features = parse_wasm_bytes(raw, "s.wasm")["analysis"]["features"]
+    assert features["prefix_counts"]["fd"] > 0
+    assert features["derived"]["simd_ratio"] > 0
+
+
+def test_miner_heuristic_fires_on_compute_bound_fixture():
+    raw = _fixture_bytes("miner_shaped.wasm")
+    report = parse_wasm_bytes(raw, "miner.wasm")
+    finding = next(
+        f for f in report["analysis"]["findings"] if f["id"] == "WASM-MIN-009"
+    )
+    assert finding["severity"] == "medium"
+    assert finding["confidence"] == "low"  # no string corroboration
+    evidence = finding["evidence"]
+    assert evidence["f64_arith_ratio"] >= 0.15
+    assert evidence["loop_function_ratio"] >= 0.5
+    assert evidence["call_op_ratio"] <= 0.08
+    assert evidence["mining_strings"] is False
+
+
+def test_miner_heuristic_corroboration_raises_confidence():
+    # The same shape with a stratum string in a data segment reaches medium.
+    def _leb(n):
+        out = bytearray()
+        while True:
+            b = n & 0x7F
+            n >>= 7
+            if n:
+                out.append(b | 0x80)
+            else:
+                out.append(b)
+                return bytes(out)
+
+    miner = _fixture_bytes("miner_shaped.wasm")
+    marker = b"stratum+tcp://pool.example.com:3333"
+    # Data section: vec(data) with one active segment (flags 0, offset
+    # expression i32.const 0 + end, then the byte vector).
+    data_payload = _leb(1) + _leb(0) + b"\x41\x00\x0b" + _leb(len(marker)) + marker
+    data_section = bytes([11]) + _leb(len(data_payload)) + data_payload
+    report = parse_wasm_bytes(miner + data_section, "miner2.wasm")
+    finding = next(
+        f for f in report["analysis"]["findings"] if f["id"] == "WASM-MIN-009"
+    )
+    assert finding["confidence"] == "medium"
+    assert finding["evidence"]["mining_strings"] is True
+
+
+def test_miner_heuristic_stays_clean_on_regular_modules():
+    for name in ("corpus/bz2.wasm", "corpus/erc20.wasm", "simd_basic.wasm",
+                 "complex_flow.wasm", "call_graph.wasm"):
+        report = parse_wasm_bytes(_fixture_bytes(name), name)
+        ids = [f["id"] for f in report["analysis"]["findings"]]
+        assert "WASM-MIN-009" not in ids, f"{name} must not match the miner shape"
+
+
+def test_miner_finding_evidence_matches_registry():
+    from wasm_tools.api import _FINDING_EVIDENCE_KEYS
+
+    raw = _fixture_bytes("miner_shaped.wasm")
+    report = parse_wasm_bytes(raw, "miner.wasm")
+    finding = next(
+        f for f in report["analysis"]["findings"] if f["id"] == "WASM-MIN-009"
+    )
+    extra = set(finding["evidence"]) - _FINDING_EVIDENCE_KEYS["WASM-MIN-009"]
+    assert not extra

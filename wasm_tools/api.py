@@ -14,6 +14,7 @@ from .component import (
     wasi_variants_from_interfaces,
 )
 from .customsections import name_precedence_names
+from .features import build_features, evaluate_miner_heuristic
 from .demangle import demangle
 from .provenance import build_provenance
 from .graph import build_call_graph, merge_component_graphs, sample_paths
@@ -39,6 +40,9 @@ _HIGH_RISK_FINDING_WEIGHTS = {
     # Compatibility advisory, not an execution risk: keeps the risk score
     # unchanged when relaxed SIMD is present.
     "WASM-ISA-008": 0,
+    # Structural advisory: numeric libraries can match the shape, so the
+    # weight stays light.
+    "WASM-MIN-009": 10,
 }
 
 # Machine-checkable evidence contract (docs/JSON_REFERENCE.md): every
@@ -71,6 +75,16 @@ _FINDING_EVIDENCE_KEYS: dict[str, set[str]] = {
     },
     "WASM-STR-007": {"signals", "counts", "samples"},
     "WASM-ISA-008": {"relaxed_opcode_count", "opcodes"},
+    "WASM-MIN-009": {
+        "f64_arith_ratio",
+        "simd_ratio",
+        "loop_function_ratio",
+        "call_op_ratio",
+        "branch_density",
+        "exported_function_count",
+        "mining_strings",
+        "thresholds",
+    },
 }
 
 # Finding vocabulary contract: severities and confidences stay inside these
@@ -258,6 +272,7 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
         instruction_budget: int | None = None,
         include_instructions: bool = True,
         include_demangled: bool = True,
+        include_features: bool = True,
     ) -> dict[str, Any]:
         """Build the final JSON-ready report for this module.
 
@@ -454,6 +469,7 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
             call_graph=call_graph,
             memories=memories,
             strings_list=strings,
+            include_features=include_features,
         )
 
         if include_demangled:
@@ -584,6 +600,7 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
         component_info: dict[str, Any] | None = None,
         memories: list[dict[str, Any]] | None = None,
         strings_list: list[dict[str, Any]] | None = None,
+        include_features: bool = True,
     ) -> dict[str, Any]:
         op_counts: dict[str, int] = {}
         loop_max_depth = 0
@@ -867,6 +884,11 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
             paths_from_export = sample_paths(
                 call_graph, sorted(i for i in js_dynamic_funcs if i >= 0)
             )
+        features_block = (
+            build_features(functions, imports, exports, self.sections)
+            if include_features
+            else None
+        )
         findings = self._build_findings(
             capabilities=capabilities,
             memory_grow_ops=memory_grow_ops,
@@ -891,6 +913,7 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
             relaxed_opcode_counts={
                 op: cnt for op, cnt in op_counts.items() if ".relaxed_" in op
             },
+            features_block=features_block,
         )
 
         cap_risk = {
@@ -965,6 +988,7 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
                 },
             },
             "findings": findings,
+            **({"features": features_block} if features_block is not None else {}),
             "dependency_hints": self._dependency_hints(
                 imports, exports, component_info
             ),
@@ -1743,6 +1767,7 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
         strings_detection: dict[str, Any] | None = kwargs.get("strings_detection")
         paths_from_export: list[list[int]] = kwargs.get("paths_from_export", [])
         relaxed_opcode_counts: dict[str, int] = kwargs.get("relaxed_opcode_counts", {})
+        features_block: dict[str, Any] | None = kwargs.get("features_block")
 
         findings: list[dict[str, Any]] = []
 
@@ -1906,6 +1931,25 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
                         "opcodes": sorted(relaxed_opcode_counts)[:20],
                     },
                     "remediation": "If bit-identical results across engines are required, recompile with strict SIMD or verify every target engine implements the relaxed semantics you rely on.",
+                }
+            )
+
+        miner_evidence = (
+            evaluate_miner_heuristic(features_block or {}, strings_detection)
+            if features_block is not None
+            else None
+        )
+        if miner_evidence is not None:
+            findings.append(
+                {
+                    "id": "WASM-MIN-009",
+                    "title": "Compute-bound module matches the structural cryptojacking shape",
+                    "severity": "medium",
+                    "confidence": "medium"
+                    if miner_evidence.get("mining_strings")
+                    else "low",
+                    "evidence": miner_evidence,
+                    "remediation": "Triage the numeric kernels: confirm the module is an expected compute library, not a cryptominer. Numeric libraries can match this shape; string corroboration raises confidence.",
                 }
             )
 
@@ -2084,6 +2128,7 @@ def _run_core_pipeline(
     instruction_budget: int | None = None,
     include_instructions: bool = True,
     include_demangled: bool = True,
+    include_features: bool = True,
 ) -> dict[str, Any]:
     """Run the two-pass core-module pipeline and return its full report."""
     options = ObjdumpOptions(mode=ObjdumpMode.RAW_DATA, filename=filename)
@@ -2103,6 +2148,7 @@ def _run_core_pipeline(
         instruction_budget=instruction_budget,
         include_instructions=include_instructions,
         include_demangled=include_demangled,
+        include_features=include_features,
     )
 
 
@@ -2147,6 +2193,7 @@ def _build_component_report(
     instruction_budget: int | None = None,
     include_instructions: bool = True,
     include_demangled: bool = True,
+    include_features: bool = True,
 ) -> dict[str, Any]:
     """Build a full triage report for a component-model binary.
 
@@ -2168,6 +2215,7 @@ def _build_component_report(
             instruction_budget=instruction_budget,
             include_instructions=include_instructions,
             include_demangled=include_demangled,
+            include_features=include_features,
         ),
     )
     sections = component.pop("sections", [])
@@ -2391,6 +2439,7 @@ def parse_wasm_bytes(
     instruction_budget: int | None = None,
     include_instructions: bool = True,
     include_demangled: bool = True,
+    include_features: bool = True,
 ) -> dict[str, Any]:
     """Parse raw wasm bytes (core module or component) into a report.
 
@@ -2417,6 +2466,7 @@ def parse_wasm_bytes(
             instruction_budget=instruction_budget,
             include_instructions=include_instructions,
             include_demangled=include_demangled,
+            include_features=include_features,
         )
     return _run_core_pipeline(
         data,
@@ -2428,6 +2478,7 @@ def parse_wasm_bytes(
         instruction_budget=instruction_budget,
         include_instructions=include_instructions,
         include_demangled=include_demangled,
+        include_features=include_features,
     )
 
 
@@ -2440,6 +2491,7 @@ def parse_wasm_file(
     instruction_budget: int | None = None,
     include_instructions: bool = True,
     include_demangled: bool = True,
+    include_features: bool = True,
 ) -> dict[str, Any]:
     """Read and parse a wasm file path into a structured report dictionary."""
     try:
@@ -2454,6 +2506,7 @@ def parse_wasm_file(
                 instruction_budget=instruction_budget,
                 include_instructions=include_instructions,
                 include_demangled=include_demangled,
+                include_features=include_features,
             )
     except OSError as exc:
         return {
@@ -2553,6 +2606,7 @@ def parse_wasm_bytes_json(
     instruction_budget: int | None = None,
     include_instructions: bool = True,
     include_demangled: bool = True,
+    include_features: bool = True,
 ) -> str:
     """Parse wasm bytes and serialize the structured report as JSON text."""
     report = parse_wasm_bytes(
@@ -2565,6 +2619,7 @@ def parse_wasm_bytes_json(
         instruction_budget=instruction_budget,
         include_instructions=include_instructions,
         include_demangled=include_demangled,
+        include_features=include_features,
     )
     return json.dumps(report, ensure_ascii=False, indent=indent)
 
@@ -2579,6 +2634,7 @@ def parse_wasm_file_json(
     instruction_budget: int | None = None,
     include_instructions: bool = True,
     include_demangled: bool = True,
+    include_features: bool = True,
 ) -> str:
     """Parse a wasm file and serialize the structured report as JSON text."""
     report = parse_wasm_file(
@@ -2590,5 +2646,6 @@ def parse_wasm_file_json(
         instruction_budget=instruction_budget,
         include_instructions=include_instructions,
         include_demangled=include_demangled,
+        include_features=include_features,
     )
     return json.dumps(report, ensure_ascii=False, indent=indent)
