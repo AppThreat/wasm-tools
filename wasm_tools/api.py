@@ -14,6 +14,8 @@ from .component import (
     wasi_variants_from_interfaces,
 )
 from .customsections import name_precedence_names
+from .demangle import demangle
+from .provenance import build_provenance
 from .graph import build_call_graph, sample_paths
 from .models import ObjdumpMode, ObjdumpOptions, ObjdumpState, SECTION_NAMES
 from .parser import BinaryReader
@@ -255,6 +257,7 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
         max_instructions_per_function: int | None = None,
         instruction_budget: int | None = None,
         include_instructions: bool = True,
+        include_demangled: bool = True,
     ) -> dict[str, Any]:
         """Build the final JSON-ready report for this module.
 
@@ -450,7 +453,29 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
             strings_detection=strings_detection,
             call_graph=call_graph,
             memories=memories,
+            strings_list=strings,
         )
+
+        if include_demangled:
+            for fn in functions:
+                name = str(fn.get("name", ""))
+                if name:
+                    demangled = demangle(name)
+                    if demangled != name:
+                        fn["demangled_name"] = demangled
+            for exp in exports:
+                name = str(exp.get("name", ""))
+                if name:
+                    demangled = demangle(name)
+                    if demangled != name:
+                        exp["demangled_name"] = demangled
+            if call_graph is not None:
+                for node in call_graph.get("nodes", []):
+                    name = str(node.get("name", ""))
+                    if name:
+                        demangled = demangle(name)
+                        if demangled != name:
+                            node["demangled_name"] = demangled
 
         # Trim after analysis: findings, profiles, and the call graph must
         # always describe the full bodies even when emission is budgeted.
@@ -558,6 +583,7 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
         call_graph: dict[str, Any] | None = None,
         component_info: dict[str, Any] | None = None,
         memories: list[dict[str, Any]] | None = None,
+        strings_list: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         op_counts: dict[str, int] = {}
         loop_max_depth = 0
@@ -941,6 +967,20 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
             "findings": findings,
             "dependency_hints": self._dependency_hints(
                 imports, exports, component_info
+            ),
+            "provenance": build_provenance(
+                toolchain=self._build_toolchain(),
+                imports=imports,
+                exports=exports,
+                function_names=[
+                    str(fn.get("name", "")) for fn in functions if fn.get("name")
+                ],
+                strings=[
+                    str(s.get("value", "")) for s in (strings_list or [])
+                ],
+                debug_str=self.objdump_state.debug_str_payload,
+                dylink=self.objdump_state.dylink,
+                has_name_section=bool(self.objdump_state.function_names),
             ),
         }
 
@@ -2043,6 +2083,7 @@ def _run_core_pipeline(
     max_instructions_per_function: int | None = None,
     instruction_budget: int | None = None,
     include_instructions: bool = True,
+    include_demangled: bool = True,
 ) -> dict[str, Any]:
     """Run the two-pass core-module pipeline and return its full report."""
     options = ObjdumpOptions(mode=ObjdumpMode.RAW_DATA, filename=filename)
@@ -2061,6 +2102,7 @@ def _run_core_pipeline(
         max_instructions_per_function=max_instructions_per_function,
         instruction_budget=instruction_budget,
         include_instructions=include_instructions,
+        include_demangled=include_demangled,
     )
 
 
@@ -2104,6 +2146,7 @@ def _build_component_report(
     max_instructions_per_function: int | None = None,
     instruction_budget: int | None = None,
     include_instructions: bool = True,
+    include_demangled: bool = True,
 ) -> dict[str, Any]:
     """Build a full triage report for a component-model binary.
 
@@ -2124,6 +2167,7 @@ def _build_component_report(
             max_instructions_per_function=max_instructions_per_function,
             instruction_budget=instruction_budget,
             include_instructions=include_instructions,
+            include_demangled=include_demangled,
         ),
     )
     sections = component.pop("sections", [])
@@ -2344,6 +2388,7 @@ def parse_wasm_bytes(
     max_instructions_per_function: int | None = None,
     instruction_budget: int | None = None,
     include_instructions: bool = True,
+    include_demangled: bool = True,
 ) -> dict[str, Any]:
     """Parse raw wasm bytes (core module or component) into a report.
 
@@ -2369,6 +2414,7 @@ def parse_wasm_bytes(
             max_instructions_per_function=max_instructions_per_function,
             instruction_budget=instruction_budget,
             include_instructions=include_instructions,
+            include_demangled=include_demangled,
         )
     return _run_core_pipeline(
         data,
@@ -2379,6 +2425,7 @@ def parse_wasm_bytes(
         max_instructions_per_function=max_instructions_per_function,
         instruction_budget=instruction_budget,
         include_instructions=include_instructions,
+        include_demangled=include_demangled,
     )
 
 
@@ -2390,6 +2437,7 @@ def parse_wasm_file(
     max_instructions_per_function: int | None = None,
     instruction_budget: int | None = None,
     include_instructions: bool = True,
+    include_demangled: bool = True,
 ) -> dict[str, Any]:
     """Read and parse a wasm file path into a structured report dictionary."""
     try:
@@ -2403,6 +2451,7 @@ def parse_wasm_file(
                 max_instructions_per_function=max_instructions_per_function,
                 instruction_budget=instruction_budget,
                 include_instructions=include_instructions,
+                include_demangled=include_demangled,
             )
     except OSError as exc:
         return {
@@ -2501,6 +2550,7 @@ def parse_wasm_bytes_json(
     max_instructions_per_function: int | None = None,
     instruction_budget: int | None = None,
     include_instructions: bool = True,
+    include_demangled: bool = True,
 ) -> str:
     """Parse wasm bytes and serialize the structured report as JSON text."""
     report = parse_wasm_bytes(
@@ -2512,6 +2562,7 @@ def parse_wasm_bytes_json(
         max_instructions_per_function=max_instructions_per_function,
         instruction_budget=instruction_budget,
         include_instructions=include_instructions,
+        include_demangled=include_demangled,
     )
     return json.dumps(report, ensure_ascii=False, indent=indent)
 
@@ -2525,6 +2576,7 @@ def parse_wasm_file_json(
     max_instructions_per_function: int | None = None,
     instruction_budget: int | None = None,
     include_instructions: bool = True,
+    include_demangled: bool = True,
 ) -> str:
     """Parse a wasm file and serialize the structured report as JSON text."""
     report = parse_wasm_file(
@@ -2535,5 +2587,6 @@ def parse_wasm_file_json(
         max_instructions_per_function=max_instructions_per_function,
         instruction_budget=instruction_budget,
         include_instructions=include_instructions,
+        include_demangled=include_demangled,
     )
     return json.dumps(report, ensure_ascii=False, indent=indent)
