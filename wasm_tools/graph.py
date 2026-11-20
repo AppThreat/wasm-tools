@@ -292,25 +292,26 @@ def merge_component_graphs(
     module 1 both have a function index 0), so every node carries
     ``module_id`` and every edge carries ``from_module``/``to_module``; the
     node identity consumers should key on is ``(module_id, index)``.
-    ``canon_wiring`` entries describe canon lift/lower records already
-    decoded from the component canon section:
-    ``{"module": int, "func": int, "type_index": int, "direction":
-    "lift"|"lower"}``. Each record becomes a ``canon`` edge between the core
-    function and a synthetic ``component:type<N>`` node: provable from the
-    canon section itself, though the interface NAME behind ``type_index``
-    needs instance and alias section decoding (a documented follow-up), so
-    cross-module interface wiring is intentionally absent rather than
-    guessed.
 
-    Each module keeps its own ``reachability`` block, keyed by module id, so
-    per-module dead-code analysis stays exact; the component-level summary
-    counts nodes, edges, and canon edges.
+    ``canon_wiring`` holds the canon lift records the component walk tied to
+    a core module function (``{"direction": "lift", "module": int, "func":
+    int, "type_index": int}``). Each becomes a ``canon`` edge from a
+    synthetic ``component:type<N>`` node, which stands for the component
+    function of that type, to the lifted core function: the component calls
+    into the core code. Lifts the walk could not tie to a module function,
+    and canon lowers (whose core function is reached only through
+    instantiation arguments), add no edge rather than a guessed one.
+    Synthetic nodes are marked ``imported`` and ``synthetic`` and take
+    indices from 10,000,000 so they never collide with a function index.
+
+    Each module keeps its own ``reachability`` block under ``per_module``;
+    the top-level block has the same keys as a core module's, with the
+    function lists holding ``[module_id, index]`` pairs.
     """
     nodes: List[dict[str, Any]] = []
     edges: List[dict[str, Any]] = []
     import_xrefs: List[dict[str, Any]] = []
     reachability: Dict[str, Any] = {}
-    edge_count = 0
     truncated = False
 
     for module_id, report in enumerate(module_reports):
@@ -320,11 +321,13 @@ def merge_component_graphs(
             entry["module_id"] = module_id
             nodes.append(entry)
         for edge in graph.get("edges", []):
+            if len(edges) >= max_edges:
+                truncated = True
+                break
             entry = dict(edge)
             entry["from_module"] = module_id
             entry["to_module"] = module_id
             edges.append(entry)
-            edge_count += 1
         for xref in graph.get("import_xrefs", []):
             entry = dict(xref)
             entry["module_id"] = module_id
@@ -333,12 +336,20 @@ def merge_component_graphs(
         if reach:
             reachability[str(module_id)] = reach
         truncated = truncated or bool(graph.get("truncated"))
-        edge_count = min(edge_count, max_edges)
 
-    # Canon wiring: synthetic interface nodes per distinct type index.
     canon_type_nodes: Dict[int, int] = {}
+    canon_edge_count = 0
     for record in canon_wiring:
-        type_index = int(record.get("type_index", -1))
+        module_id = record.get("module")
+        func = record.get("func")
+        type_index = record.get("type_index")
+        if (
+            record.get("direction") != "lift"
+            or not isinstance(module_id, int)
+            or not isinstance(func, int)
+            or not isinstance(type_index, int)
+        ):
+            continue
         if type_index not in canon_type_nodes:
             synthetic_index = 10_000_000 + type_index
             canon_type_nodes[type_index] = synthetic_index
@@ -352,39 +363,34 @@ def merge_component_graphs(
                     "synthetic": True,
                 }
             )
-        target = canon_type_nodes[type_index]
-        direction = str(record.get("direction", "lift"))
-        module_id = record.get("module")
-        if direction == "lift":
-            edges.append(
-                {
-                    "from": record.get("func"),
-                    "from_module": module_id,
-                    "to": target,
-                    "to_module": None,
-                    "kind": "canon",
-                    "offset": None,
-                    "type_index": type_index,
-                }
-            )
-        else:
-            edges.append(
-                {
-                    "from": target,
-                    "from_module": None,
-                    "to": record.get("func"),
-                    "to_module": module_id,
-                    "kind": "canon",
-                    "offset": None,
-                    "type_index": type_index,
-                }
-            )
-            edge_count += 1
+        if len(edges) >= max_edges:
+            truncated = True
+            continue
+        edges.append(
+            {
+                "from": canon_type_nodes[type_index],
+                "from_module": None,
+                "to": func,
+                "to_module": module_id,
+                "kind": "canon",
+                "offset": None,
+                "type_index": type_index,
+            }
+        )
+        canon_edge_count += 1
 
-    canon_edge_count = sum(1 for e in edges if e.get("kind") == "canon")
+    def _pairs(key: str) -> List[List[int]]:
+        return sorted(
+            [int(module_id), index]
+            for module_id, reach in reachability.items()
+            for index in reach.get(key) or []
+        )
+
+    reachable = _pairs("reachable_functions")
+    unreachable = _pairs("unreachable_functions")
     return {
         "node_count": len(nodes),
-        "edge_count": edge_count + canon_edge_count,
+        "edge_count": len(edges),
         "truncated": truncated,
         "nodes": nodes,
         "edges": edges,
@@ -392,12 +398,10 @@ def merge_component_graphs(
         "reachability": {
             "per_module": reachability,
             "roots": [],
-            "reachable_functions": sum(
-                r.get("reachable_count", 0) for r in reachability.values()
-            ),
-            "unreachable_functions": sum(
-                r.get("unreachable_count", 0) for r in reachability.values()
-            ),
+            "reachable_functions": reachable,
+            "reachable_count": len(reachable),
+            "unreachable_functions": unreachable,
+            "unreachable_count": len(unreachable),
         },
         "component_summary": {
             "module_count": len(module_reports),

@@ -338,12 +338,13 @@ def _nameattributes_with_attributes(
 
 
 def test_component_async_canon_builtins_decode():
-    # WASI 0.3 async-era canon built-ins (Binary.md canon grammar):
+    # WASI 0.3 async-era canon built-ins, in the encodings Rust wasm-tools
+    # 1.263 writes (one component per built-in, canon bytes dumped):
     # stream.new (0x0e t), task.return (0x09 resultlist opts),
-    # thread.spawn-ref (0x40 sh? ft), error-context.drop (0x1e).
+    # thread.spawn-ref (0x40 ft, no shared byte), error-context.drop (0x1e).
     stream_new = b"\x0e" + _leb(1)
     task_return = b"\x09" + b"\x01\x00" + _leb(0)  # resultlist 0x01 0x00, opts []
-    spawn_ref = b"\x40" + b"\x00" + _leb(2)
+    spawn_ref = b"\x40" + _leb(2)
     error_drop = b"\x1e"
     canon = _section(8, _leb(4) + stream_new + task_return + spawn_ref + error_drop)
     report = parse_wasm_bytes(_component([canon]), "canon03.wasm")
@@ -357,6 +358,39 @@ def test_component_async_canon_builtins_decode():
         "error-context.drop": 1,
     }
     assert report["errors"] == []
+
+
+@pytest.mark.parametrize(
+    "entry,name",
+    [
+        (b"\x0a\x7f" + _leb(0), "context.get"),
+        (b"\x0b\x7f" + _leb(1), "context.set"),
+        (b"\x0c\x00", "thread.yield"),
+        (b"\x1f", "waitable-set.new"),
+        (b"\x20\x00" + _leb(0), "waitable-set.wait"),
+        (b"\x21\x00" + _leb(0), "waitable-set.poll"),
+        (b"\x22", "waitable-set.drop"),
+        (b"\x23", "waitable.join"),
+        (b"\x24", "backpressure.inc"),
+        (b"\x25", "backpressure.dec"),
+        (b"\x26", "thread.index"),
+        (b"\x27" + _leb(0) + _leb(0), "thread.new-indirect"),
+        (b"\x28", "thread.resume-later"),
+        (b"\x29\x00", "thread.suspend"),
+        (b"\x2a\x00", "thread.suspend-then-resume"),
+        (b"\x41" + _leb(0) + _leb(0), "thread.spawn-indirect"),
+        (b"\x42", "thread.available-parallelism"),
+    ],
+)
+def test_component_threading_and_waitable_builtins_decode(entry, name):
+    # Byte layouts from Rust wasm-tools 1.263; before they were decoded,
+    # each one abandoned the whole canon section. A trailing error-context
+    # drop proves the entry was framed to its exact length.
+    canon = _section(8, _leb(2) + entry + b"\x1e")
+    report = parse_wasm_bytes(_component([canon]), "builtin.wasm")
+    assert report["errors"] == []
+    builtins = report["component"]["canonical_options"]["builtins"]
+    assert builtins == {name: 1, "error-context.drop": 1}
 
 
 def test_component_unknown_canon_kind_still_abandons_section():
@@ -447,24 +481,65 @@ def test_component_graph_per_module_reachability():
 
 def test_canon_lift_records_create_canon_edges():
     core = _core_fixture_bytes("simple_add.wasm")
-    # One core module followed by a canon lift of its function 0 into
-    # component type 3.
+    # A core module, an instance of it, an alias of its "add" export as
+    # core func 0, then a canon lift of that core func into component type 3.
+    instance = _section(2, _leb(1) + b"\x00" + _leb(0) + _leb(0))
+    alias = _section(6, _leb(1) + b"\x00\x00\x01" + _leb(0) + _leb(3) + b"add")
     canon = _section(8, _leb(1) + b"\x00\x00" + _leb(0) + _leb(0) + _leb(3))
-    report = parse_wasm_bytes(_component([_section(1, core), canon]), "lift.wasm")
+    report = parse_wasm_bytes(
+        _component([_section(1, core), instance, alias, canon]), "lift.wasm"
+    )
 
+    assert report["errors"] == []
     graph = report["call_graph"]
     canon_edges = [e for e in graph["edges"] if e["kind"] == "canon"]
     assert len(canon_edges) == 1
     edge = canon_edges[0]
-    assert edge["from"] == 0 and edge["from_module"] == 0
-    assert edge["to_module"] is None and edge["type_index"] == 3
+    # The component calls into the lifted core function.
+    assert edge["from_module"] is None and edge["from"] == 10_000_003
+    assert edge["to"] == 0 and edge["to_module"] == 0
+    assert edge["type_index"] == 3
     synthetic = [n for n in graph["nodes"] if n.get("synthetic")]
     assert synthetic and synthetic[0]["name"] == "component:type3"
     assert graph["component_summary"]["canon_edge_count"] == 1
-    # The export surface mapping records the lift.
+    assert graph["edge_count"] == len(graph["edges"])
     assert report["component"]["exported_functions"] == [
         {"module": 0, "func": 0, "type_index": 3}
     ]
+
+
+def test_an_unresolved_lift_adds_no_edge():
+    # A lift of a core func that is not an alias of a module export (here
+    # no alias at all) cannot be tied to a module function, so it adds no
+    # edge rather than a guessed one.
+    core = _core_fixture_bytes("simple_add.wasm")
+    canon = _section(8, _leb(1) + b"\x00\x00" + _leb(0) + _leb(0) + _leb(3))
+    report = parse_wasm_bytes(_component([_section(1, core), canon]), "lift.wasm")
+    assert [e for e in report["call_graph"]["edges"] if e["kind"] == "canon"] == []
+    assert report["component"]["exported_functions"] == [
+        {"module": None, "func": None, "type_index": 3}
+    ]
+
+
+def test_wit_component_lifts_resolve_to_the_main_module():
+    # tests/fixtures/wit_lift_lower.wasm: `wasm-tools component embed
+    # --dummy wit_lift_lower.wit` then `wasm-tools component new` (1.263).
+    # The world imports x (a canon lower) and exports run and run2, which
+    # lift the main module's exports "cm32p2||run" (func 1) and
+    # "cm32p2||run2" (func 3); module 1 is the generated fixup module.
+    report = parse_wasm_bytes(
+        _core_fixture_bytes("wit_lift_lower.wasm"), "wit_lift_lower.wasm"
+    )
+    assert report["errors"] == []
+    graph = report["call_graph"]
+    canon = sorted((e["to_module"], e["to"]) for e in graph["edges"] if e["kind"] == "canon")
+    assert canon == [(0, 1), (0, 3)]
+    assert graph["edge_count"] == len(graph["edges"])
+    reach = graph["reachability"]
+    assert reach["reachable_count"] == len(reach["reachable_functions"])
+    assert all(len(pair) == 2 for pair in reach["reachable_functions"])
+    profile = report["analysis"]["profiles"]["control_flow"]
+    assert profile["export_reachable_functions"] == reach["reachable_count"]
 
 
 def test_single_module_core_reports_have_no_module_ids():

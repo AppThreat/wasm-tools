@@ -64,42 +64,66 @@ _CANON_OPT_WITH_INDEX = {0x03, 0x04, 0x05, 0x07}
 _NAME_ATTRIBUTE_KINDS = {0x00: "implements", 0x01: "version-suffix", 0x02: "external-id"}
 
 # Async-era canon built-ins (Binary.md canon grammar, WASI 0.3 layout):
-# name -> payload shape descriptor.
-#   bare            no immediates
-#   async           one async? byte (0x00 sync / 0x01 async)
-#   typeidx         one component type index
-#   typeidx+opts    one component type index then an opts vector
-#   typeidx+async   one component type index then an async? byte
-#   resultlist+opts task.return's resultlist then an opts vector
-#   sh+coretype     sh? byte then a core type index
-#   sh+coretype+coretable  sh? byte, core type index, core table index
+# opcode -> (name, payload shape). The shapes were checked against the
+# encoder of Rust wasm-tools 1.263 (one component per built-in, canon bytes
+# dumped). Every built-in defines one core function.
+#   bare        no immediates
+#   flag        one byte (async?, or the cancel flag of the thread built-ins)
+#   u32         one index (a component type, or a core type for spawn-ref)
+#   u32+u32     two indices (a core type and a core table)
+#   u32+opts    one component type index then an opts vector
+#   u32+flag    one component type index then an async? byte
+#   flag+u32    a flag byte then a core memory index
+#   i32+u32     the 0x7f valtype byte then a context slot index
+#   opts        an opts vector
+#   resultlist+opts  task.return's resultlist then an opts vector
 _CANON_BUILTINS = {
     0x05: ("task.cancel", "bare"),
-    0x06: ("subtask.cancel", "async"),
+    0x06: ("subtask.cancel", "flag"),
+    0x07: ("resource.drop-async", "u32"),
+    0x08: ("backpressure.set", "bare"),
     0x09: ("task.return", "resultlist+opts"),
+    0x0A: ("context.get", "i32+u32"),
+    0x0B: ("context.set", "i32+u32"),
+    0x0C: ("thread.yield", "flag"),
     0x0D: ("subtask.drop", "bare"),
-    0x0E: ("stream.new", "typeidx"),
-    0x0F: ("stream.read", "typeidx+opts"),
-    0x10: ("stream.write", "typeidx+opts"),
-    0x11: ("stream.cancel-read", "typeidx+async"),
-    0x12: ("stream.cancel-write", "typeidx+async"),
-    0x13: ("stream.drop-readable", "typeidx"),
-    0x14: ("stream.drop-writable", "typeidx"),
-    0x15: ("future.new", "typeidx"),
-    0x16: ("future.read", "typeidx+opts"),
-    0x17: ("future.write", "typeidx+opts"),
-    0x18: ("future.cancel-read", "typeidx+async"),
-    0x19: ("future.cancel-write", "typeidx+async"),
-    0x1A: ("future.drop-readable", "typeidx"),
-    0x1B: ("future.drop-writable", "typeidx"),
+    0x0E: ("stream.new", "u32"),
+    0x0F: ("stream.read", "u32+opts"),
+    0x10: ("stream.write", "u32+opts"),
+    0x11: ("stream.cancel-read", "u32+flag"),
+    0x12: ("stream.cancel-write", "u32+flag"),
+    0x13: ("stream.drop-readable", "u32"),
+    0x14: ("stream.drop-writable", "u32"),
+    0x15: ("future.new", "u32"),
+    0x16: ("future.read", "u32+opts"),
+    0x17: ("future.write", "u32+opts"),
+    0x18: ("future.cancel-read", "u32+flag"),
+    0x19: ("future.cancel-write", "u32+flag"),
+    0x1A: ("future.drop-readable", "u32"),
+    0x1B: ("future.drop-writable", "u32"),
     0x1C: ("error-context.new", "opts"),
     0x1D: ("error-context.debug-message", "opts"),
     0x1E: ("error-context.drop", "bare"),
-    0x2E: ("stream.forward", "typeidx"),
-    0x2F: ("future.forward", "typeidx"),
-    0x40: ("thread.spawn-ref", "sh+coretype"),
-    0x41: ("thread.spawn-indirect", "sh+coretype+coretable"),
-    0x42: ("thread.available-parallelism", "sh"),
+    0x1F: ("waitable-set.new", "bare"),
+    0x20: ("waitable-set.wait", "flag+u32"),
+    0x21: ("waitable-set.poll", "flag+u32"),
+    0x22: ("waitable-set.drop", "bare"),
+    0x23: ("waitable.join", "bare"),
+    0x24: ("backpressure.inc", "bare"),
+    0x25: ("backpressure.dec", "bare"),
+    0x26: ("thread.index", "bare"),
+    0x27: ("thread.new-indirect", "u32+u32"),
+    0x28: ("thread.resume-later", "bare"),
+    0x29: ("thread.suspend", "flag"),
+    0x2A: ("thread.suspend-then-resume", "flag"),
+    0x2B: ("thread.yield-then-resume", "flag"),
+    0x2C: ("thread.suspend-then-promote", "flag"),
+    0x2D: ("thread.yield-then-promote", "flag"),
+    0x2E: ("stream.forward", "u32"),
+    0x2F: ("future.forward", "u32"),
+    0x40: ("thread.spawn-ref", "u32"),
+    0x41: ("thread.spawn-indirect", "u32+u32"),
+    0x42: ("thread.available-parallelism", "bare"),
 }
 
 
@@ -389,6 +413,12 @@ def _decode_component_section(
         count = r.read_u32_leb()
         for _ in range(count):
             canon_kind = r.read_u8()
+            core_funcs = extras.get("core_funcs")
+            if canon_kind != 0x00 and core_funcs is not None:
+                # Every canon definition except lift adds one core function
+                # (a lowered import or a built-in); none of them is a
+                # function of a core module.
+                core_funcs.append(None)
             if canon_kind == 0x00:  # lift
                 r.read_u8()  # 0x00 reserved
                 core_func_idx = r.read_u32_leb()  # core func idx
@@ -399,24 +429,15 @@ def _decode_component_section(
                 extras.setdefault("records", []).append(
                     {
                         "direction": "lift",
-                        "module": extras.get("current_core_module"),
-                        "func": core_func_idx,
+                        "core_func": core_func_idx,
                         "type_index": type_idx,
                     }
                 )
             elif canon_kind == 0x01:  # lower
                 r.read_u8()  # 0x00 reserved
-                lowered_func_idx = r.read_u32_leb()  # func idx
+                r.read_u32_leb()  # component func idx
                 canon_opts.extend(_read_canon_options(r))
                 extras["lower_count"] += 1
-                extras.setdefault("records", []).append(
-                    {
-                        "direction": "lower",
-                        "module": extras.get("current_core_module"),
-                        "func": lowered_func_idx,
-                        "type_index": None,
-                    }
-                )
             elif canon_kind in (0x02, 0x03, 0x04):  # resource new/drop/rep
                 r.read_u32_leb()
                 extras["resource_count"] += 1
@@ -426,16 +447,28 @@ def _decode_component_section(
                 # are skipped because their immediates carry no capability
                 # signal beyond the built-in name itself.
                 builtin_name, shape = _CANON_BUILTINS[canon_kind]
-                if shape == "async":
+                if shape == "flag":
                     r.read_u8()
-                elif shape == "typeidx":
+                elif shape == "u32":
                     r.read_u32_leb()
-                elif shape == "typeidx+opts":
+                elif shape == "u32+u32":
+                    r.read_u32_leb()
+                    r.read_u32_leb()
+                elif shape == "u32+opts":
                     r.read_u32_leb()
                     _read_canon_options(r)
-                elif shape == "typeidx+async":
+                elif shape == "u32+flag":
                     r.read_u32_leb()
                     r.read_u8()
+                elif shape == "flag+u32":
+                    r.read_u8()
+                    r.read_u32_leb()
+                elif shape == "i32+u32":
+                    if r.read_u8() != 0x7F:
+                        raise _ComponentParseError(
+                            f"{builtin_name} expects the i32 valtype"
+                        )
+                    r.read_u32_leb()
                 elif shape == "opts":
                     _read_canon_options(r)
                 elif shape == "resultlist+opts":
@@ -448,15 +481,6 @@ def _decode_component_section(
                                 "task.return resultlist must end with 0x00"
                             )
                     _read_canon_options(r)
-                elif shape == "sh+coretype":
-                    r.read_u8()  # sh? 0x00/0x01
-                    r.read_u32_leb()
-                elif shape == "sh+coretype+coretable":
-                    r.read_u8()  # sh? 0x00/0x01
-                    r.read_u32_leb()
-                    r.read_u32_leb()
-                elif shape == "sh":
-                    r.read_u8()  # sh? 0x00/0x01
                 extras.setdefault("builtin_counts", {})
                 extras["builtin_counts"][builtin_name] = (
                     extras["builtin_counts"].get(builtin_name, 0) + 1
@@ -535,7 +559,13 @@ def parse_component_bytes(
     r = _CReader(data)
     r.offset = 8
     section_index = 0
-    extras_core_module = None
+    # The component's core index spaces, as far as they are needed to tie a
+    # canon lift to the core module function it lifts: each core module
+    # index maps to its position in ``core_modules`` (None for an aliased
+    # module), each core instance to the module it instantiates (None when
+    # unknown), and each core function to ``(module, export name)`` when it
+    # is an alias of an instance export, else None.
+    spaces: dict[str, List[Any]] = {"modules": [], "instances": [], "funcs": []}
     while r.offset < r.size:
         try:
             section_id = r.read_u8()
@@ -564,11 +594,12 @@ def parse_component_bytes(
             if section_id == 1 and core_parse is not None and depth < _MAX_NESTING:
                 report = core_parse(payload)
                 report["core_module_index"] = len(result["core_modules"])
+                spaces["modules"].append(len(result["core_modules"]))
                 result["core_modules"].append(report)
-                # Canon entries that follow reference the most recent core
-                # module (the componentize layout order); recorded as an
-                # association approximation in the canon records.
-                extras_core_module = len(result["core_modules"]) - 1
+            elif section_id == 2:
+                _decode_core_instances(sub, spaces)
+            elif section_id == 6:
+                _decode_aliases(sub, spaces)
             elif section_id == 4 and depth < _MAX_NESTING:
                 nested = parse_component_bytes(
                     payload, core_parse=core_parse, depth=depth + 1
@@ -577,7 +608,7 @@ def parse_component_bytes(
                 nested["core_module_index"] = None
                 result.setdefault("nested_components", []).append(nested)
             elif section_id in (8, 10, 11):
-                section_extras = {"current_core_module": extras_core_module}
+                section_extras = {"core_funcs": spaces["funcs"]}
                 imports, exports, canon_opts, extras = _decode_component_section(
                     section_id, sub, len(payload), section_extras
                 )
@@ -698,6 +729,7 @@ def parse_component_bytes(
     result["export_count"] = len(result["exports"])
     result["core_module_count"] = len(result["core_modules"])
 
+    _resolve_lifts(result, spaces)
     # (module_id, core func index) -> lifted type index: the component
     # export surface mapping consumers can use for entry-point labeling.
     result["exported_functions"] = [
@@ -710,6 +742,109 @@ def parse_component_bytes(
         if record.get("direction") == "lift"
     ]
     return result
+
+
+def _decode_core_instances(r: _CReader, spaces: dict[str, List[Any]]) -> None:
+    """Grow the core instance space from a core instance section.
+
+    core:instance ::= 0x00 m:moduleidx vec(instantiatearg)
+                    | 0x01 vec(inlineexport)
+    An instantiation records the module it instantiates; an instance built
+    from inline exports maps to no module.
+    """
+    count = r.read_u32_leb()
+    for _ in range(count):
+        kind = r.read_u8()
+        if kind == 0x00:
+            module_idx = r.read_u32_leb()
+            for _ in range(r.read_u32_leb()):
+                r.read_name()
+                if r.read_u8() != 0x12:
+                    raise _ComponentParseError("instantiate argument must be an instance")
+                r.read_u32_leb()
+            modules = spaces["modules"]
+            spaces["instances"].append(
+                modules[module_idx] if module_idx < len(modules) else None
+            )
+        elif kind == 0x01:
+            for _ in range(r.read_u32_leb()):
+                r.read_name()
+                r.read_u8()  # core sort
+                r.read_u32_leb()
+            spaces["instances"].append(None)
+        else:
+            raise _ComponentParseError(f"core instance kind {kind:#x} not decoded")
+
+
+# Core sorts (Binary.md core:sort) the index spaces above track.
+_CORE_SORT_FUNC = 0x00
+_CORE_SORT_MODULE = 0x11
+_CORE_SORT_INSTANCE = 0x12
+
+
+def _decode_aliases(r: _CReader, spaces: dict[str, List[Any]]) -> None:
+    """Grow the core module, instance and function spaces from aliases.
+
+    alias ::= sort target, sort ::= 0x00 core:sort | other component sorts,
+    target ::= 0x00 instance name | 0x01 core-instance name | 0x02 outer idx.
+    Only core funcs aliased from a core instance export can be tied to a
+    module function; every other core alias still takes its index slot.
+    """
+    count = r.read_u32_leb()
+    for _ in range(count):
+        sort = r.read_u8()
+        core_sort = r.read_u8() if sort == 0x00 else None
+        target = r.read_u8()
+        source = None
+        if target in (0x00, 0x01):
+            instance_idx = r.read_u32_leb()
+            name = r.read_name()
+            if target == 0x01:
+                instances = spaces["instances"]
+                module = instances[instance_idx] if instance_idx < len(instances) else None
+                if module is not None:
+                    source = (module, name)
+        elif target == 0x02:
+            r.read_u32_leb()
+            r.read_u32_leb()
+        else:
+            raise _ComponentParseError(f"alias target {target:#x} not decoded")
+        if core_sort == _CORE_SORT_FUNC:
+            spaces["funcs"].append(source)
+        elif core_sort == _CORE_SORT_MODULE:
+            spaces["modules"].append(None)
+        elif core_sort == _CORE_SORT_INSTANCE:
+            spaces["instances"].append(None)
+
+
+def _resolve_lifts(result: dict[str, Any], spaces: dict[str, List[Any]]) -> None:
+    """Tie each canon lift to the core module function it lifts.
+
+    The lift names a core function index; when that function is an alias of
+    a core instance export, the instantiated module's export of that name
+    gives the function index inside the module. A lift that cannot be
+    resolved this way keeps ``module`` and ``func`` as None rather than a
+    guess.
+    """
+    modules = result.get("core_modules", [])
+    for record in result.get("canon_records", []):
+        if record.get("direction") != "lift":
+            continue
+        record["module"] = None
+        record["func"] = None
+        core_func = record.get("core_func")
+        funcs = spaces["funcs"]
+        source = funcs[core_func] if isinstance(core_func, int) and core_func < len(funcs) else None
+        if source is None:
+            continue
+        module, name = source
+        if not 0 <= module < len(modules):
+            continue
+        for export in modules[module].get("exports") or []:
+            if export.get("name") == name and export.get("kind") == "func":
+                record["module"] = module
+                record["func"] = export.get("ref_index")
+                break
 
 
 def wasi_variants_from_interfaces(interfaces: List[str]) -> List[str]:

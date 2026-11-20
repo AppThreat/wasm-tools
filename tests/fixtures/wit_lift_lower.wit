@@ -1,0 +1,6 @@
+package a:b;
+world w {
+  import x: func(v: u32) -> u32;
+  export run: func() -> u32;
+  export run2: func() -> u32;
+}
