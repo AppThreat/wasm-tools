@@ -238,6 +238,9 @@ class ObjdumpState:
         self.component_type: Optional[Dict[str, Any]] = None
         # Coredump convention: the "core" custom section was seen.
         self.coredump: bool = False
+        # Retained DWARF payloads for source mapping (.debug_line,
+        # .debug_line_str, .debug_info), bounded by the retention cap.
+        self.debug_payloads: Dict[str, bytes] = {}
         self.imports: List[ImportEntry] = []
         self.exports: List[ExportEntry] = []
         self.globals: List[GlobalEntry] = []

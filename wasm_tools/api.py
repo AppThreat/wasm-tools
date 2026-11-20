@@ -14,6 +14,11 @@ from .component import (
     wasi_variants_from_interfaces,
 )
 from .cfg import build_function_cfg
+from .dwarf import (
+    map_function_sources,
+    parse_debug_info_units,
+    parse_line_program,
+)
 from .customsections import name_precedence_names
 from .features import build_features, evaluate_miner_heuristic
 from .obfuscation import build_obfuscation_detection
@@ -529,6 +534,47 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
             instruction_budget,
             max_instructions_per_function,
         )
+        # DWARF phase 1: function-level source mapping from .debug_line.
+        # Wasm DWARF addresses are code-section-relative; the function's
+        # code-relative address is its file offset minus the code section's
+        # file offset. No rows or no coverage means no mapping is emitted.
+        debug_payloads = state.debug_payloads
+        line_payload = debug_payloads.get(".debug_line")
+        if line_payload:
+            line_table = parse_line_program(
+                line_payload,
+                debug_payloads.get(".debug_line_str"),
+                state.debug_str_payload,
+            )
+            if line_table and line_table.get("rows"):
+                code_section_offset = next(
+                    (
+                        int(sec.get("offset", 0))
+                        for sec in self.sections
+                        if int(sec.get("id", -1)) == 10
+                    ),
+                    0,
+                )
+                addresses = [
+                    (
+                        int(fn.get("index", -1)),
+                        int(fn.get("offset", 0)) - code_section_offset,
+                    )
+                    for fn in functions
+                    if isinstance(fn.get("index"), int)
+                ]
+                sources = map_function_sources(line_table, addresses)
+                for fn in functions:
+                    source = sources.get(int(fn.get("index", -1)))
+                    if source is not None:
+                        fn["source"] = source
+            info_payload = debug_payloads.get(".debug_info")
+            if info_payload:
+                units = parse_debug_info_units(info_payload)
+                if units:
+                    toolchain = dict(toolchain)
+                    toolchain["compilation_units"] = units
+
         if include_cfg and include_instructions:
             # CFGs need the instruction streams; with instruction emission
             # off the block structure is not recoverable from the report.

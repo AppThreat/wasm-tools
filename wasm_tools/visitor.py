@@ -261,12 +261,29 @@ class BinaryReaderObjdumpPrepass(BinaryReaderObjdumpBase):
     def on_target_feature(self, enabled: bool, name: str) -> None:
         self.objdump_state.target_features.append((enabled, name))
 
+    # DWARF payloads the source-mapping layer needs. Unstripped builds ship
+    # multi-megabyte DWARF, so retention stops at the documented cap.
+    _RETAINED_DEBUG_SECTIONS = (".debug_line", ".debug_line_str", ".debug_info")
+    _MAX_DWARF_RETENTION = 8 * 1024 * 1024
+
     def on_debug_section(self, name: str, payload: memoryview) -> None:
-        # Only .debug_str carries analyst-useful strings; other DWARF
-        # sections are detected by name alone. The parser hands over a
-        # zero-copy view, so copy the one payload we keep.
+        # .debug_str carries analyst-useful strings; the line-mapping layer
+        # needs .debug_line, .debug_line_str and .debug_info. The parser
+        # hands over a zero-copy view, so retained payloads are copied.
         if name == ".debug_str":
             self.objdump_state.debug_str_payload = bytes(payload)
+            return
+        if name not in type(self)._RETAINED_DEBUG_SECTIONS:
+            return
+        retained = getattr(self.objdump_state, "debug_payloads", None)
+        if retained is None:
+            retained = {}
+            self.objdump_state.debug_payloads = retained
+        if sum(len(value) for value in retained.values()) >= type(
+            self
+        )._MAX_DWARF_RETENTION:
+            return
+        retained[name] = bytes(payload)
 
     def on_branch_hints(self, info: dict) -> None:
         self.objdump_state.branch_hints = info
