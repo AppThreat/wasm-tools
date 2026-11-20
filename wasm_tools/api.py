@@ -13,6 +13,7 @@ from .component import (
     suggested_wit_purl,
     wasi_variants_from_interfaces,
 )
+from .customsections import name_precedence_names
 from .graph import build_call_graph, sample_paths
 from .models import ObjdumpMode, ObjdumpOptions, ObjdumpState, SECTION_NAMES
 from .parser import BinaryReader
@@ -89,9 +90,25 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
         if self.sections:
             self.sections[-1]["name"] = section_name
 
-    def on_branch_hints(self, name: str, hinted_functions: int | None) -> None:
+    def on_branch_hints(self, info: dict[str, Any]) -> None:
         """Record the metadata.code.branch_hint custom section summary."""
-        self.branch_hints = (name, hinted_functions)
+        self.branch_hints = info
+
+    def on_dylink_section(self, info: dict[str, Any]) -> None:
+        """Record emscripten dylink.0 / legacy dylink metadata."""
+        self.objdump_state.dylink = info
+
+    def on_linking_section(self, info: dict[str, Any]) -> None:
+        """Record the LLVM/lld linking custom section (symbol table)."""
+        self.objdump_state.linking = info
+
+    def on_component_type_section(self, info: dict[str, Any]) -> None:
+        """Record the component-type custom section summary."""
+        self.objdump_state.component_type = info
+
+    def on_core_coredump(self) -> None:
+        """Record presence of the coredump convention custom section."""
+        self.objdump_state.coredump = True
 
     def begin_function_body(self, index: int, size: int) -> None:
         """Start collecting instructions for a function body."""
@@ -216,6 +233,14 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
             fn["instruction_count"] = len(fn["instructions"])
 
         state = self.objdump_state
+
+        # Name precedence: the name section wins; linking symbol names fill
+        # the gaps for object-file wasm built without a name section.
+        linking_function_names = name_precedence_names(state.linking)
+        function_names = {**linking_function_names, **state.function_names}
+        for fn in functions:
+            if not fn.get("name") and fn["index"] in linking_function_names:
+                fn["name"] = linking_function_names[fn["index"]]
 
         types = [
             {
@@ -365,7 +390,7 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
                 imports=imports,
                 exports=exports,
                 elements=elements,
-                function_names=state.function_names,
+                function_names=function_names,
                 start_function=state.start_function,
             )
 
@@ -423,6 +448,26 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
             "analysis": analysis,
             "errors": self.errors,
         }
+        # Well-known custom sections are reported only when present, so
+        # modules without them keep the historical report shape.
+        if state.dylink is not None:
+            report["dylink"] = state.dylink
+        if state.linking is not None:
+            linking_block = dict(state.linking)
+            em_js_segments = sum(
+                1
+                for name in linking_block.get("segment_names", [])
+                if name == "__em_js"
+            )
+            if em_js_segments:
+                linking_block["em_js_segments"] = em_js_segments
+            report["linking"] = linking_block
+        if state.branch_hints is not None:
+            report["branch_hints"] = state.branch_hints
+        if state.component_type is not None:
+            report["component_type"] = state.component_type
+        if state.coredump:
+            report["coredump"] = True
         if truncation is not None:
             report["truncation"] = truncation
         return report

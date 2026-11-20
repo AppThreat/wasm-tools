@@ -268,8 +268,20 @@ class BinaryReaderObjdumpPrepass(BinaryReaderObjdumpBase):
         if name == ".debug_str":
             self.objdump_state.debug_str_payload = bytes(payload)
 
-    def on_branch_hints(self, name: str, hinted_functions: Optional[int]) -> None:
-        self.objdump_state.branch_hints = (name, hinted_functions)
+    def on_branch_hints(self, info: dict) -> None:
+        self.objdump_state.branch_hints = info
+
+    def on_dylink_section(self, info: dict) -> None:
+        self.objdump_state.dylink = info
+
+    def on_linking_section(self, info: dict) -> None:
+        self.objdump_state.linking = info
+
+    def on_component_type_section(self, info: dict) -> None:
+        self.objdump_state.component_type = info
+
+    def on_core_coredump(self) -> None:
+        self.objdump_state.coredump = True
 
 
 class BinaryReaderObjdumpHeaders(BinaryReaderObjdumpBase):

@@ -226,10 +226,18 @@ class ObjdumpState:
         self.type_kinds: Dict[int, str] = {}
         # Raw .debug_str custom-section payload when present (DWARF strings).
         self.debug_str_payload: Optional[bytes] = None
-        # metadata.code.branch_hint custom section: (section name, hinted
-        # function count) when present; the count is None when the payload is
-        # malformed.
-        self.branch_hints: Optional[Tuple[str, Optional[int]]] = None
+        # metadata.code.branch_hint custom section summary (the decoded
+        # info dict from customsections.parse_branch_hints, with the section
+        # name added), when present.
+        self.branch_hints: Optional[Dict[str, Any]] = None
+        # Emscripten dynamic-linking metadata (dylink.0 / legacy dylink).
+        self.dylink: Optional[Dict[str, Any]] = None
+        # LLVM/lld object-file symbol table (linking custom section).
+        self.linking: Optional[Dict[str, Any]] = None
+        # component-type custom section summary (version and payload size).
+        self.component_type: Optional[Dict[str, Any]] = None
+        # Coredump convention: the "core" custom section was seen.
+        self.coredump: bool = False
         self.imports: List[ImportEntry] = []
         self.exports: List[ExportEntry] = []
         self.globals: List[GlobalEntry] = []

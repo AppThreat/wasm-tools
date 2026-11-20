@@ -748,15 +748,36 @@ def test_parse_wasm_file_reports_multi_memory():
 
 def test_parse_wasm_file_reports_branch_hints():
     # metadata.code.branch_hint custom section (branch-hinting proposal):
-    # payload is vec(function) per tool-conventions CodeMetadata.md; a
-    # top-level count of 2 functions is enough for the signal.
-    hint_payload = _leb(2) + _leb(0) + _leb(1) + b"\x01\x00\x01" + _leb(1) + _leb(1) + b"\x01\x04\x00"
+    # payload is vec(function), each function being funcidx + a vector of
+    # (offset, 0x01 size, hint) entries per tool-conventions CodeMetadata.md.
+    hint_payload = (
+        _leb(2)
+        + _leb(0) + _leb(1) + b"\x04\x01\x01"
+        + _leb(1) + _leb(2) + b"\x08\x01\x00" + b"\x10\x01\x01"
+    )
     hint_section = bytes([0]) + _leb(len(_name("metadata.code.branch_hint") + hint_payload)) + _name("metadata.code.branch_hint") + hint_payload
     core = b"\x00asm\x01\x00\x00\x00" + hint_section
     report = parse_wasm_bytes(core, "hints.wasm")
 
     assert "branch_hints_present" in report["analysis"]["detections"]["format"]["signals"]
     assert "isa.branch-hints" in report["analysis"]["capabilities"]
+    hints = report["branch_hints"]
+    assert hints["hinted_function_count"] == 2
+    assert hints["hint_count"] == 3
+    assert hints["functions"][0]["hints"] == [{"offset": 4, "hint": "likely"}]
+    assert hints["functions"][1]["hints"] == [
+        {"offset": 8, "hint": "unlikely"},
+        {"offset": 16, "hint": "likely"},
+    ]
+
+
+def test_malformed_branch_hint_payload_degrades_to_error_string():
+    hint_payload = _leb(1) + _leb(0) + _leb(1) + b"\x04\x02\x01"  # size 0x02 invalid
+    hint_section = bytes([0]) + _leb(len(_name("metadata.code.branch_hint") + hint_payload)) + _name("metadata.code.branch_hint") + hint_payload
+    core = b"\x00asm\x01\x00\x00\x00" + hint_section
+    report = parse_wasm_bytes(core, "badhints.wasm")
+    assert any("branch_hint" in err for err in report["errors"])
+    assert "branch_hints" not in report
 
 
 # ─── Instruction budgets (P01) ───────────────────────────────────────────────

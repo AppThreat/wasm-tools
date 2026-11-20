@@ -90,8 +90,9 @@ def test_prepass_records_custom_section_names():
 
 def test_prepass_records_branch_hints_section():
     # A module carrying metadata.code.branch_hint: the prepass records the
-    # section name and hinted function count for the analysis layer.
-    payload = _leb(1)  # one hinted function
+    # decoded summary (CodeMetadata.md: funcidx, then vec(offset, 0x01
+    # size, hint)).
+    payload = _leb(1) + _leb(0) + _leb(1) + b"\x04\x01\x01"
     hint_section = (
         bytes([0])
         + _leb(len(_name("metadata.code.branch_hint") + payload))
@@ -100,7 +101,12 @@ def test_prepass_records_branch_hints_section():
     )
     core = b"\x00asm\x01\x00\x00\x00" + hint_section
     state = _run_prepass(core)
-    assert state.branch_hints == ("metadata.code.branch_hint", 1)
+    assert state.branch_hints["name"] == "metadata.code.branch_hint"
+    assert state.branch_hints["hinted_function_count"] == 1
+    assert state.branch_hints["hint_count"] == 1
+    assert state.branch_hints["functions"] == [
+        {"function": 0, "hints": [{"offset": 4, "hint": "likely"}]}
+    ]
 
 
 def test_base_offset_bookkeeping_starts_at_zero():

@@ -1,6 +1,13 @@
 import struct
 from typing import Any, List, Optional, Tuple
 
+from .customsections import (
+    parse_branch_hints,
+    parse_component_type,
+    parse_dylink,
+    parse_dylink_legacy,
+    parse_linking,
+)
 from .models import BinarySection
 from .opcodes import OPCODES, ImmType
 
@@ -418,17 +425,57 @@ class BinaryReader:
         elif name == "metadata.code.branch_hint" and hasattr(
             self.delegate, "on_branch_hints"
         ):
-            # Branch hinting proposal (tool-conventions CodeMetadata.md): the
-            # payload is vec(function) where each entry is a function index
-            # followed by a vector of (relative offset, hint) pairs. The
-            # top-level count names the hinted functions, which is enough for
-            # format signals; full per-branch decode is left to the custom
-            # section catalog.
-            try:
-                hinted_functions = self.read_leb128(max_bits=32)
-            except WasmParseError:
-                hinted_functions = None
-            self.delegate.on_branch_hints(name, hinted_functions)
+            # Branch hinting proposal (tool-conventions CodeMetadata.md).
+            # Full decode lives in the custom section catalog; a malformed
+            # payload degrades to an error string without costing the rest
+            # of the module.
+            info = parse_branch_hints(self.data[self.offset : end_offset])
+            if info is not None:
+                info["name"] = name
+                self.delegate.on_branch_hints(info)
+            else:
+                self.delegate.on_error(
+                    "malformed metadata.code.branch_hint custom section"
+                )
+        elif name in ("dylink.0", "dylink") and hasattr(
+            self.delegate, "on_dylink_section"
+        ):
+            # Emscripten dynamic linking ABI (tool-conventions
+            # DynamicLinking.md). The needed-libraries list is a literal
+            # dependency declaration, so a parse failure is reported but the
+            # module keeps walking.
+            payload = self.data[self.offset : end_offset]
+            info = (
+                parse_dylink(payload)
+                if name == "dylink.0"
+                else parse_dylink_legacy(payload)
+            )
+            if info is not None:
+                info["name"] = name
+                self.delegate.on_dylink_section(info)
+            else:
+                self.delegate.on_error(f"malformed {name} custom section")
+        elif name == "linking" and hasattr(self.delegate, "on_linking_section"):
+            # LLVM/lld object-file wasm (tool-conventions Linking.md): the
+            # symbol table is the only name source in object files built
+            # without a name section.
+            info = parse_linking(self.data[self.offset : end_offset])
+            if info is not None:
+                info["name"] = name
+                self.delegate.on_linking_section(info)
+            else:
+                self.delegate.on_error("malformed linking custom section")
+        elif name == "component-type" and hasattr(
+            self.delegate, "on_component_type_section"
+        ):
+            info = parse_component_type(self.data[self.offset : end_offset])
+            if info is not None:
+                info["name"] = name
+                self.delegate.on_component_type_section(info)
+        elif name == "core" and hasattr(self.delegate, "on_core_coredump"):
+            # Coredump convention (tool-conventions Coredump.md): presence
+            # alone is the signal; the payload is runtime-specific.
+            self.delegate.on_core_coredump()
 
     def _read_comptype(self) -> Tuple[str, List[str], List[str]]:
         """Read one subtype/composite type; return (kind, params, results).
