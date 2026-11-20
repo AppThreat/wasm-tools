@@ -1,0 +1,67 @@
+tests/test_component.py
+  s_f313f304041c9f::t_37e06b2c0926fd 324-409
+wasm_tools/parser.py
+  s_f313f304041c9f::t_70a5e9ce4091dd 418-431
+tests/fixtures/build.py
+  s_f313f304041c9f::t_237941d7830282 85-88,90,95,97
+  s_f313f304041c9f::t_b947b0ba2fa50d 129-135
+  s_f313f304041c9f::t_828bc6c31ed0d5 34-84,89,91-94,96,98-120
+tests/test_limits_opcodes_toolchain.py
+  s_f313f304041c9f::t_81972d0e224b2c 163-193,196-199,215-216
+  s_f313f304041c9f::t_4d60de90fa275e 194-195
+  s_f313f304041c9f::t_fc46045cea7c02 200-214
+tests/fixtures/js_string.wat
+  s_f313f304041c9f::t_947a0833989868 1-14
+wasm_tools/opcodes.py
+  s_f313f304041c9f::t_beedbf696c19fa 638-657
+tests/test_visitor.py
+  s_f313f304041c9f::t_cfb919db30e0af 1-23,41-45,47,60,71,75-81,83-85,89-95,100-109,111-122
+  s_f313f304041c9f::t_7d0b1b9eeb80df 24-40,46,48-59,61-62,68-70,72-74,82,86-88,96-99,110
+  s_f313f304041c9f::t_642c5ce97df1a5 63-67
+wasm_tools/api.py
+  s_f313f304041c9f::t_e755190350f56c 1647-1670
+  s_f313f304041c9f::t_5b5bba8784995d 593-598
+  s_f313f304041c9f::t_49b128e11d3a5e 89-92
+  s_f313f304041c9f::t_49b208a318809e 670
+  s_f313f304041c9f::t_b7eefd9574a91e 64
+  s_f313f304041c9f::t_85a3c5c1c28470 968
+  s_f313f304041c9f::t_ea9740966ac5f7 1181-1184
+  s_f313f304041c9f::t_64aea72ec3bfc8 944-949
+  s_f313f304041c9f::t_54cf6ba7b28244 1266-1271
+wasm_tools/component.py
+  s_f313f304041c9f::t_33e342e55480c0 102
+  s_f313f304041c9f::t_d5a5d59e05635c 283-284
+  s_f313f304041c9f::t_316d4cf85a17c5 209,211-215
+  s_f313f304041c9f::t_278c265f206a6d 170,173-174,179,184-190,195-208,210,216-265
+  s_f313f304041c9f::t_f212adfcad6a1e 561-569
+  s_f313f304041c9f::t_c8aad8fa5aa411 400-440
+  s_f313f304041c9f::t_a9e4d38b22a3bb 45-48,63-101,103
+  s_f313f304041c9f::t_7db5bcbbd464aa 360,364-365,370,373-374
+  s_f313f304041c9f::t_1e6760440792e0 596-605
+  s_f313f304041c9f::t_f1b788ca402061 104
+tests/test_json_api.py
+  s_f313f304041c9f::t_49b515a80b3a66 684-688,706-758
+  s_f313f304041c9f::t_3a56a93f5a5eb7 689-705
+wasm_tools/models.py
+  s_f313f304041c9f::t_bc0ab26632be4e 229-232
+tests/fixtures/multi_memory.wat
+  s_f313f304041c9f::t_947a0833989868 1-17
+wasm_tools/visitor.py
+  s_f313f304041c9f::t_c86529a496605a 271-273
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "077b1e503e448987e838e240d8776e1b8f5ea870",
+  "prompts": {},
+  "sessions": {
+    "s_f313f304041c9f": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "sess_02a3d826-3148-4c5e-a179-e38422bb7d90",
+        "model": "GLM-5.3"
+      },
+      "human_author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  }
+}
