@@ -15,7 +15,6 @@ is not installed.
 
 import functools
 import os
-import re
 import shutil
 import struct
 import subprocess
@@ -42,18 +41,23 @@ _WAT2WASM_FEATURES = [
 
 @functools.cache
 def _rust_wasm_tools():
-    """The Rust wasm-tools binary; this package's own CLI shares the name."""
+    """The Rust wasm-tools binary; this package's own CLI shares the name.
+
+    Both print "wasm-tools X.Y.Z" for --version, so the probe asks for the
+    help of the Rust tool's ``parse`` subcommand, which this package's CLI
+    rejects with a usage error.
+    """
     for directory in os.environ.get("PATH", "").split(os.pathsep):
         candidate = os.path.join(directory, "wasm-tools")
         if not os.access(candidate, os.X_OK):
             continue
         try:
             probe = subprocess.run(
-                [candidate, "--version"], capture_output=True, text=True, timeout=30
+                [candidate, "parse", "--help"], capture_output=True, text=True, timeout=30
             )
         except (OSError, subprocess.TimeoutExpired):
             continue
-        if re.match(r"wasm-tools \d+\.\d+\.\d+", probe.stdout):
+        if probe.returncode == 0 and "WebAssembly text format" in probe.stdout:
             return candidate
     return None
 
