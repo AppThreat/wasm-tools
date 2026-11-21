@@ -2,15 +2,29 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from typing import Any, Optional
 
 from .component import (
     detect_component,
     parse_component_bytes,
+    parse_wit_name,
+    suggested_wit_purl,
     wasi_variants_from_interfaces,
 )
-from .graph import build_call_graph, sample_paths
+from .cfg import build_function_cfg
+from .dwarf import (
+    map_function_sources,
+    parse_debug_info_units,
+    parse_line_program,
+)
+from .customsections import name_precedence_names
+from .features import build_features, evaluate_miner_heuristic
+from .obfuscation import build_obfuscation_detection
+from .demangle import demangle
+from .provenance import build_provenance
+from .graph import build_call_graph, merge_component_graphs, sample_paths
 from .models import ObjdumpMode, ObjdumpOptions, ObjdumpState, SECTION_NAMES
 from .parser import BinaryReader
 from .strings import (
@@ -33,7 +47,74 @@ _HIGH_RISK_FINDING_WEIGHTS = {
     # Compatibility advisory, not an execution risk: keeps the risk score
     # unchanged when relaxed SIMD is present.
     "WASM-ISA-008": 0,
+    # Structural advisory: numeric libraries can match the shape, so the
+    # weight stays light.
+    "WASM-MIN-009": 10,
+    # Multi-signal obfuscation evidence; the score already gates firing.
+    "WASM-OBF-010": 15,
 }
+
+# Machine-checkable evidence contract (docs/JSON_REFERENCE.md): every
+# finding's evidence keys must stay inside this registry so the shapes
+# consumers (blint, dep-scan) rely on remain small, named, and stable. A
+# test enforces it against every emitted finding.
+_FINDING_EVIDENCE_KEYS: dict[str, set[str]] = {
+    "WASM-CAP-001": {"capabilities"},
+    "WASM-CFG-002": {
+        "indirect_call_ops",
+        "table_mutation_ops",
+        "dynamic_funcs",
+        "table_mutation_funcs",
+    },
+    "WASM-DOS-003": {
+        "memory_grow_ops",
+        "loop_memory_grow_ops",
+        "loop_memory_ops",
+        "functions",
+        "functions_truncated",
+    },
+    "WASM-LOOP-004": {"max_loop_depth"},
+    "WASM-FMT-005": {"kind", "signals", "module_version"},
+    "WASM-JSCFG-006": {
+        "indirect_call_ops",
+        "table_mutation_ops",
+        "js_exposed_dynamic_funcs",
+        "js_exposed_table_mutation_funcs",
+        "paths_from_export",
+    },
+    "WASM-STR-007": {"signals", "counts", "samples"},
+    "WASM-ISA-008": {"relaxed_opcode_count", "opcodes"},
+    "WASM-MIN-009": {
+        "f64_arith_ratio",
+        "simd_ratio",
+        "loop_function_ratio",
+        "call_op_ratio",
+        "branch_density",
+        "exported_function_count",
+        "mining_strings",
+        "thresholds",
+    },
+    "WASM-OBF-010": {
+        "score",
+        "signals",
+        "dispatcher_functions",
+        "packed_segments",
+        "duplicate_body_ratio",
+        "median_function_instructions",
+        "exported_function_count",
+    },
+}
+
+# Finding vocabulary contract: severities and confidences stay inside these
+# sets so downstream converters (dep-scan's blint_convert) never meet a
+# value they must silently remap.
+_FINDING_SEVERITIES = {"critical", "high", "medium", "low", "info"}
+_FINDING_CONFIDENCES = {"high", "medium", "low", "none"}
+
+# Versioned consumer contract for machine consumers (cdxgen, blint): the
+# documented top-level keys are stable within a major version, additive
+# within a minor.
+REPORT_CONTRACT = "wasm-tools/2"
 
 
 def _tier_from_score(score: int) -> str:
@@ -61,6 +142,7 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
         self._functions: dict[int, dict[str, Any]] = {}
         self._current_function: dict[str, Any] | None = None
         self._pending_instruction: dict[str, Any] | None = None
+        self.branch_hints: tuple[str, int | None] | None = None
 
     def begin_module(self, version: int) -> None:
         """Capture the module version from the binary header."""
@@ -85,6 +167,26 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
         if self.sections:
             self.sections[-1]["name"] = section_name
 
+    def on_branch_hints(self, info: dict[str, Any]) -> None:
+        """Record the metadata.code.branch_hint custom section summary."""
+        self.branch_hints = info
+
+    def on_dylink_section(self, info: dict[str, Any]) -> None:
+        """Record emscripten dylink.0 / legacy dylink metadata."""
+        self.objdump_state.dylink = info
+
+    def on_linking_section(self, info: dict[str, Any]) -> None:
+        """Record the LLVM/lld linking custom section (symbol table)."""
+        self.objdump_state.linking = info
+
+    def on_component_type_section(self, info: dict[str, Any]) -> None:
+        """Record the component-type custom section summary."""
+        self.objdump_state.component_type = info
+
+    def on_core_coredump(self) -> None:
+        """Record presence of the coredump convention custom section."""
+        self.objdump_state.coredump = True
+
     def begin_function_body(self, index: int, size: int) -> None:
         """Start collecting instructions for a function body."""
         self._current_function = {
@@ -92,10 +194,20 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
             "name": self.objdump_state.function_names.get(index, ""),
             "signature_index": self.objdump_state.function_types.get(index),
             "offset": self.offset,
+            "body_offset": getattr(self, "function_body_offset", None),
             "body_size": size,
             "instructions": [],
         }
         self._functions[index] = self._current_function
+
+    def on_local_decl(self, func_idx: int, decl_index: int, count: int, ltype: str) -> None:
+        """Record one local declaration group for the active function."""
+        if self._current_function is not None and int(func_idx) == int(
+            self._current_function.get("index", -1)
+        ):
+            self._current_function.setdefault("local_decls", []).append(
+                [int(count), str(ltype)]
+            )
 
     def end_function_body(self, index: int) -> None:
         """Close function collection and flush unfinished instruction records."""
@@ -122,8 +234,12 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
         """Finalize an `end` opcode that closes an expression."""
         self._finalize_instruction()
 
-    def on_opcode_block_sig(self, sig: int) -> None:
-        """Finalize block-like opcodes with signature immediates."""
+    def on_opcode_block_sig(self, sig: int, ref_type=None) -> None:
+        """Finalize block-like opcodes with signature immediates. A block
+        that yields a reference type also records its name in
+        ``block_type``, since the integer alone cannot carry the heap type."""
+        if ref_type is not None and self._pending_instruction is not None:
+            self._pending_instruction["block_type"] = str(ref_type)
         self._append_immediates(sig)
 
     def on_opcode_index(self, idx: int) -> None:
@@ -146,6 +262,15 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
         """Finalize opcodes with one 64-bit float immediate."""
         self._append_immediates(val)
 
+    def on_opcode_br_table(self, targets: List[int], default: int) -> None:
+        """Record br_table immediates (target list then the default label)."""
+        if self._pending_instruction is None:
+            return
+        self._pending_instruction["immediates"].extend(
+            [int(v) for v in targets] + [int(default)]
+        )
+        self._finalize_instruction()
+
     def on_opcode_uint32_uint32(self, v1: int, v2: int) -> None:
         """Finalize opcodes with two integer immediates."""
         self._append_immediates(v1, v2)
@@ -158,13 +283,81 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
         """Capture parser errors for programmatic callers."""
         self.errors.append(message)
 
+    def on_opcode_select_t(self, types: list) -> None:
+        """Record typed select's valtype vector."""
+        if self._pending_instruction is None:
+            return
+        self._pending_instruction["immediates"].extend([str(t) for t in types])
+        self._finalize_instruction()
+
+    def on_opcode_heap_type(self, ht: str) -> None:
+        """Record heap-type immediates (ref.cast, ref.test, call_ref)."""
+        if self._pending_instruction is None:
+            return
+        self._pending_instruction["immediates"].append(str(ht))
+        self._finalize_instruction()
+
+    def on_opcode_v128(self, raw: bytes) -> None:
+        """Record v128.const's 16 raw bytes."""
+        if self._pending_instruction is None:
+            return
+        self._pending_instruction["immediates"] = list(raw)
+        self._finalize_instruction()
+
+    def on_opcode_v128_shuffle(self, lanes: list) -> None:
+        """Record v128.shuffle's 16 lane indices."""
+        if self._pending_instruction is None:
+            return
+        self._pending_instruction["immediates"].extend(int(v) for v in lanes)
+        self._finalize_instruction()
+
+    def on_opcode_br_on_cast(self, flags: int, label: int, ht1: str, ht2: str) -> None:
+        """Record br_on_cast's flags, label, and heap types."""
+        if self._pending_instruction is None:
+            return
+        self._pending_instruction["immediates"].extend(
+            [int(flags), int(label), str(ht1), str(ht2)]
+        )
+        self._finalize_instruction()
+
+    def on_opcode_try_table(self, sig: int, catches: list, ref_type=None) -> None:
+        """Record try_table's block signature and catch clauses."""
+        if self._pending_instruction is None:
+            return
+        if ref_type is not None:
+            self._pending_instruction["block_type"] = str(ref_type)
+        recorded: list = [int(sig)]
+        for clause in catches:
+            recorded.extend(int(v) for v in clause)
+        self._pending_instruction["immediates"] = recorded
+        self._pending_instruction["catches"] = [
+            [int(v) for v in clause] for clause in catches
+        ]
+        self._finalize_instruction()
+
+    def on_opcode_memarg(self, align: int, mem_offset: int, mem_idx=None) -> None:
+        """Record memarg immediates, including an explicit memory index."""
+        if self._pending_instruction is None:
+            return
+        immediates = self._pending_instruction["immediates"]
+        if mem_idx is not None:
+            immediates.append(int(mem_idx))
+        immediates.extend([int(align), int(mem_offset)])
+        self._finalize_instruction()
+
     def on_opcode_lane_idx(self, lane: int) -> None:
         """Finalize lane-index SIMD opcodes."""
         self._append_immediates(lane)
 
-    def on_opcode_memarg_lane(self, align: int, mem_offset: int, lane: int) -> None:
-        """Finalize SIMD memory lane opcodes with align, offset, and lane immediates."""
-        self._append_immediates(align, mem_offset, lane)
+    def on_opcode_memarg_lane(
+        self, align: int, mem_offset: int, lane: int, mem_idx=None
+    ) -> None:
+        """Record v128 lane-access immediates: the memory index when explicit
+        (as for plain memargs), then align, offset and lane."""
+        if mem_idx is not None:
+            self._append_immediates(int(mem_idx), int(align), int(mem_offset), int(lane))
+        else:
+            self._append_immediates(int(align), int(mem_offset), int(lane))
 
     def _append_immediates(self, *values: Any) -> None:
         """Append immediate values and finalize the current instruction."""
@@ -184,19 +377,41 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
         strings_min_len: int = 5,
         include_strings: bool = True,
         include_call_graph: bool = True,
+        max_instructions_per_function: int | None = None,
+        instruction_budget: int | None = None,
+        include_instructions: bool = True,
+        include_demangled: bool = True,
+        include_features: bool = True,
+        include_cfg: bool = False,
     ) -> dict[str, Any]:
         """Build the final JSON-ready report for this module.
 
         ``strings_min_len`` controls extraction (the CLI flag must reach this
         call or short strings can never surface); ``include_strings`` and
         ``include_call_graph`` let consumers opt out of the heavier derived
-        blocks.
+        blocks. ``max_instructions_per_function`` caps every function's
+        emitted instruction stream and ``instruction_budget`` shares a total
+        budget across functions with max-min fair shares; both default to
+        None (unbounded, the historical behavior). Trimming runs after
+        analysis so findings and profiles always describe the full bodies,
+        and ``instruction_count`` keeps the pre-trim value.
+        ``include_instructions=False`` drops emitted instruction streams
+        entirely (``instructions_omitted`` marks each function) while
+        analysis, the call graph, and counts still describe the full decode.
         """
         functions = [self._functions[idx] for idx in sorted(self._functions)]
         for fn in functions:
             fn["instruction_count"] = len(fn["instructions"])
 
         state = self.objdump_state
+
+        # Name precedence: the name section wins; linking symbol names fill
+        # the gaps for object-file wasm built without a name section.
+        linking_function_names = name_precedence_names(state.linking)
+        function_names = {**linking_function_names, **state.function_names}
+        for fn in functions:
+            if not fn.get("name") and fn["index"] in linking_function_names:
+                fn["name"] = linking_function_names[fn["index"]]
 
         types = [
             {
@@ -276,8 +491,11 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
             if m is not None
         ]
 
-        data_segments = [
-            {
+        data_segments = []
+        for d in state.data_segments:
+            if d is None:
+                continue
+            entry = {
                 "index": d.index,
                 "mode": d.mode,
                 "memory_index": d.memory_index,
@@ -285,9 +503,11 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
                 "offset_value": d.offset_value,
                 "size": d.size,
             }
-            for d in state.data_segments
-            if d is not None
-        ]
+            if d.data:
+                # Segment-level entropy for packing analysis; computed here
+                # so every consumer sees it without re-reading bytes.
+                entry["entropy"] = _segment_entropy(d.data)
+            data_segments.append(entry)
 
         elements = [
             {
@@ -346,7 +566,7 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
                 imports=imports,
                 exports=exports,
                 elements=elements,
-                function_names=state.function_names,
+                function_names=function_names,
                 start_function=state.start_function,
             )
 
@@ -363,12 +583,93 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
             strings_detection=strings_detection,
             call_graph=call_graph,
             memories=memories,
+            strings_list=strings,
+            include_features=include_features,
+            segment_payloads=segments,
         )
 
-        return {
+        if include_demangled:
+            for fn in functions:
+                name = str(fn.get("name", ""))
+                if name:
+                    demangled = demangle(name)
+                    if demangled != name:
+                        fn["demangled_name"] = demangled
+            for exp in exports:
+                name = str(exp.get("name", ""))
+                if name:
+                    demangled = demangle(name)
+                    if demangled != name:
+                        exp["demangled_name"] = demangled
+            if call_graph is not None:
+                for node in call_graph.get("nodes", []):
+                    name = str(node.get("name", ""))
+                    if name:
+                        demangled = demangle(name)
+                        if demangled != name:
+                            node["demangled_name"] = demangled
+
+        # Trim after analysis: findings, profiles, and the call graph must
+        # always describe the full bodies even when emission is budgeted.
+        truncation = _budget_functions(
+            functions,
+            instruction_budget,
+            max_instructions_per_function,
+        )
+        # DWARF phase 1: function-level source mapping from .debug_line.
+        # Wasm DWARF addresses are code-section-relative; the function's
+        # code-relative address is its file offset minus the code section's
+        # file offset. No rows or no coverage means no mapping is emitted.
+        debug_payloads = state.debug_payloads
+        line_payload = debug_payloads.get(".debug_line")
+        if line_payload:
+            line_table = parse_line_program(
+                line_payload,
+                debug_payloads.get(".debug_line_str"),
+                state.debug_str_payload,
+            )
+            if line_table and line_table.get("rows"):
+                code_section_offset = next(
+                    (
+                        int(sec.get("offset", 0))
+                        for sec in self.sections
+                        if int(sec.get("id", -1)) == 10
+                    ),
+                    0,
+                )
+                # DW_AT_low_pc and the line rows name the body start (the
+                # locals vector after the body size), relative to the code
+                # section payload.
+                addresses = [
+                    (int(fn["index"]), int(fn["body_offset"]) - code_section_offset)
+                    for fn in functions
+                    if isinstance(fn.get("index"), int) and isinstance(fn.get("body_offset"), int)
+                ]
+                sources = map_function_sources(line_table, addresses)
+                for fn in functions:
+                    source = sources.get(int(fn.get("index", -1)))
+                    if source is not None:
+                        fn["source"] = source
+            info_payload = debug_payloads.get(".debug_info")
+            if info_payload:
+                units = parse_debug_info_units(info_payload)
+                if units:
+                    toolchain = dict(toolchain)
+                    toolchain["compilation_units"] = units
+
+        if include_cfg and include_instructions:
+            # CFGs need the instruction streams; with instruction emission
+            # off the block structure is not recoverable from the report.
+            for fn in functions:
+                fn["cfg"] = build_function_cfg(fn.get("instructions") or [])
+        if not include_instructions:
+            _strip_instruction_streams(functions)
+
+        report = {
             "file": self.filename,
             "module_version": self.module_version,
             "is_component": False,
+            "report_contract": REPORT_CONTRACT,
             "section_count": len(self.sections),
             "sections": self.sections,
             "function_count": len(functions),
@@ -394,6 +695,29 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
             "analysis": analysis,
             "errors": self.errors,
         }
+        # Well-known custom sections are reported only when present, so
+        # modules without them keep the historical report shape.
+        if state.dylink is not None:
+            report["dylink"] = state.dylink
+        if state.linking is not None:
+            linking_block = dict(state.linking)
+            em_js_segments = sum(
+                1
+                for name in linking_block.get("segment_names", [])
+                if name == "__em_js"
+            )
+            if em_js_segments:
+                linking_block["em_js_segments"] = em_js_segments
+            report["linking"] = linking_block
+        if state.branch_hints is not None:
+            report["branch_hints"] = state.branch_hints
+        if state.component_type is not None:
+            report["component_type"] = state.component_type
+        if state.coredump:
+            report["coredump"] = True
+        if truncation is not None:
+            report["truncation"] = truncation
+        return report
 
     @staticmethod
     def _limits_dict(limits: Any) -> dict[str, Any]:
@@ -437,6 +761,9 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
         call_graph: dict[str, Any] | None = None,
         component_info: dict[str, Any] | None = None,
         memories: list[dict[str, Any]] | None = None,
+        strings_list: list[dict[str, Any]] | None = None,
+        include_features: bool = True,
+        segment_payloads: list[tuple[int, bytes]] | None = None,
     ) -> dict[str, Any]:
         op_counts: dict[str, int] = {}
         loop_max_depth = 0
@@ -485,14 +812,67 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
             for imp in imports
             if str(imp.get("kind", "")) == "func" and self._is_js_related_import(imp)
         }
+        imported_function_count = self.objdump_state.imported_function_count
+        simd_prefixes = (
+            "v128.",
+            "i8x16.",
+            "i16x8.",
+            "i32x4.",
+            "i64x2.",
+            "f32x4.",
+            "f64x2.",
+            "f16x8.",
+        )
+        exception_ops = {
+            "try_table",
+            "throw",
+            "throw_ref",
+            "try",
+            "catch",
+            "catch_all",
+            "rethrow",
+            "delegate",
+        }
+        gc_ops = {
+            "ref.eq",
+            "any.convert_extern",
+            "extern.convert_any",
+            "br_on_cast",
+            "br_on_cast_fail",
+        }
 
         for fn in functions:
             active_loops = 0
             block_stack: list[str] = []
             instructions = fn.get("instructions", [])
+            fn_max_loop_depth = 0
+            fn_features = {
+                "has_loop": False,
+                "max_loop_depth": 0,
+                "has_direct_call": False,
+                "has_indirect_call": False,
+                "has_call_ref": False,
+                "has_tail_call": False,
+                "has_table_mutation": False,
+                "has_memory_grow": False,
+                "has_bulk_memory": False,
+                "has_simd": False,
+                "has_atomics": False,
+                "has_exceptions": False,
+                "has_gc_ops": False,
+                "calls_imported_functions": False,
+                "imported_callees": 0,
+            }
+            imported_callees: set[int] = set()
+            fn_mnemonics: list[str] = []
+            fn_max_br_table_in_loop = 0
+            fn_br_table_count = 0
+            fn_br_if_count = 0
+            fn_const_predicate_br = 0
             for ins_idx, ins in enumerate(instructions):
                 op = ins.get("opcode", "")
                 op_counts[op] = op_counts.get(op, 0) + 1
+                fn_mnemonics.append(op)
 
                 if op.startswith("unknown_"):
                     unknown_opcode_count += 1
@@ -502,12 +882,63 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
                     block_stack.append(op)
                     if op == "loop":
                         active_loops += 1
+                        fn_max_loop_depth = max(fn_max_loop_depth, active_loops)
                         loop_max_depth = max(loop_max_depth, active_loops)
                 elif op == "end" and block_stack:
                     if block_stack.pop() == "loop":
                         active_loops = max(0, active_loops - 1)
                 elif op == "delegate" and block_stack:
                     block_stack.pop()
+
+                if op == "loop":
+                    fn_features["has_loop"] = True
+                if op == "br_table":
+                    fn_br_table_count += 1
+                    if active_loops > 0:
+                        targets = len(ins.get("immediates") or [])
+                        fn_max_br_table_in_loop = max(
+                            fn_max_br_table_in_loop, targets
+                        )
+                if op == "br_if":
+                    fn_br_if_count += 1
+                    nearby = instructions[max(0, ins_idx - 3) : ins_idx]
+                    if any(
+                        str(nearby_ins.get("opcode", "")) == "i32.const"
+                        for nearby_ins in nearby
+                    ):
+                        fn_const_predicate_br += 1
+                if op in {"call", "return_call"}:
+                    fn_features["has_direct_call"] = True
+                    if op == "return_call":
+                        fn_features["has_tail_call"] = True
+                    if op == "call" and ins.get("immediates"):
+                        target = ins["immediates"][0]
+                        if isinstance(target, int) and target < imported_function_count:
+                            fn_features["calls_imported_functions"] = True
+                            imported_callees.add(target)
+                if op in {"call_indirect", "return_call_indirect"}:
+                    fn_features["has_indirect_call"] = True
+                    fn_features["has_tail_call"] = fn_features["has_tail_call"] or (
+                        op == "return_call_indirect"
+                    )
+                if op in call_ref_ops:
+                    fn_features["has_call_ref"] = True
+                if op in table_mutators:
+                    fn_features["has_table_mutation"] = True
+                if op == "memory.grow":
+                    fn_features["has_memory_grow"] = True
+                if op in bulk_memory:
+                    fn_features["has_bulk_memory"] = True
+                if op.startswith(simd_prefixes):
+                    fn_features["has_simd"] = True
+                if op.startswith(
+                    ("memory.atomic.", "i32.atomic.", "i64.atomic.")
+                ) or op == "atomic.fence":
+                    fn_features["has_atomics"] = True
+                if op in exception_ops:
+                    fn_features["has_exceptions"] = True
+                if op.startswith(("struct.", "array.", "ref.i31", "i31.get")) or op in gc_ops:
+                    fn_features["has_gc_ops"] = True
 
                 is_memory_access = (
                     op.startswith("i32.load")
@@ -576,6 +1007,25 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
                     table_mutation_ops += 1
                     table_mutation_funcs.add(fn.get("index", -1))
 
+            fn_features["max_loop_depth"] = fn_max_loop_depth
+            fn_features["instruction_count"] = len(instructions)
+            fn_features["imported_callees"] = len(imported_callees)
+            fn_features["max_br_table_targets_in_loop"] = fn_max_br_table_in_loop
+            fn_features["br_table_count"] = fn_br_table_count
+            fn_features["const_branch_density"] = (
+                round(fn_const_predicate_br / fn_br_if_count, 4)
+                if fn_br_if_count
+                else 0.0
+            )
+            # body_hash covers the mnemonic sequence only (immediates
+            # excluded), so two functions with the same instruction shape
+            # hash identically regardless of constant values.
+            fn_features["body_hash"] = (
+                "sha256:"
+                + hashlib.sha256(" ".join(fn_mnemonics).encode("utf-8")).hexdigest()
+            )
+            fn["features"] = fn_features
+
         capabilities = sorted(
             self._capabilities_from_imports(imports)
             | self._capabilities_from_opcodes(
@@ -585,6 +1035,12 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
                 types=types,
             )
         )
+        if any(
+            int(sec.get("id", -1)) == 0
+            and str(sec.get("name", "")) == "metadata.code.branch_hint"
+            for sec in sections
+        ):
+            capabilities.append("isa.branch-hints")
         wasi_detection = self._wasi_signals_from_imports(imports, component_info)
         js_interface_detection = self._js_interface_signals(
             imports=imports,
@@ -617,6 +1073,25 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
             paths_from_export = sample_paths(
                 call_graph, sorted(i for i in js_dynamic_funcs if i >= 0)
             )
+        features_block = (
+            build_features(functions, imports, exports, self.sections)
+            if include_features
+            else None
+        )
+        custom_names = {
+            str(sec.get("name", ""))
+            for sec in sections
+            if int(sec.get("id", -1)) == 0
+        }
+        obfuscation_detection = build_obfuscation_detection(
+            functions=functions,
+            exports=exports,
+            data_segments=data_segments,
+            segment_payloads=segment_payloads or [],
+            dylink=self.objdump_state.dylink,
+            custom_section_names=custom_names,
+            has_name_section=bool(self.objdump_state.function_names),
+        )
         findings = self._build_findings(
             capabilities=capabilities,
             memory_grow_ops=memory_grow_ops,
@@ -641,6 +1116,8 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
             relaxed_opcode_counts={
                 op: cnt for op, cnt in op_counts.items() if ".relaxed_" in op
             },
+            features_block=features_block,
+            obfuscation_detection=obfuscation_detection,
         )
 
         cap_risk = {
@@ -656,6 +1133,7 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
             "host.global": 2,
             "host.tag": 2,
             "js.host": 6,
+            "js-strings": 6,
         }
         capability_score = sum(cap_risk.get(cap, 0) for cap in capabilities)
         findings_score = sum(
@@ -685,6 +1163,8 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
         }
         if strings_detection is not None:
             detections["strings"] = strings_detection
+        if obfuscation_detection is not None:
+            detections["obfuscation"] = obfuscation_detection
 
         return {
             "summary": {
@@ -714,7 +1194,133 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
                 },
             },
             "findings": findings,
+            **({"features": features_block} if features_block is not None else {}),
+            "dependency_hints": self._dependency_hints(
+                imports, exports, component_info
+            ),
+            "provenance": build_provenance(
+                toolchain=self._build_toolchain(),
+                imports=imports,
+                exports=exports,
+                function_names=[
+                    str(fn.get("name", "")) for fn in functions if fn.get("name")
+                ],
+                strings=[
+                    str(s.get("value", "")) for s in (strings_list or [])
+                ],
+                debug_str=self.objdump_state.debug_str_payload,
+                dylink=self.objdump_state.dylink,
+                has_name_section=bool(self.objdump_state.function_names),
+            ),
         }
+
+    def _dependency_hints(
+        self,
+        imports: list[dict[str, Any]],
+        exports: list[dict[str, Any]],
+        component_info: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Evidence-first framework and interface hints, never version guesses.
+
+        Core-module imports carry no versions in the binary, so a hint only
+        claims a version when a producers entry or a WIT interface name
+        states one. Each hint names its evidence so consumers can audit the
+        claim instead of trusting the label.
+        """
+        hints: list[dict[str, Any]] = []
+
+        def add(hint: str, evidence: list[str], confidence: str) -> None:
+            hints.append(
+                {"hint": hint, "evidence": "; ".join(evidence), "confidence": confidence}
+            )
+
+        producers = self.objdump_state.producers
+        processed_by = {
+            name: version for name, version in producers.get("processed-by", [])
+        }
+        languages = {name for name, _ in producers.get("language", [])}
+        export_names = [str(exp.get("name", "")) for exp in exports]
+        import_modules = [str(imp.get("module", "")) for imp in imports]
+
+        if "wasm-bindgen" in processed_by:
+            add(
+                "wasm-bindgen",
+                [f"producers.processed_by[wasm-bindgen]={processed_by['wasm-bindgen']}"],
+                "high",
+            )
+        else:
+            wbg_exports = [n for n in export_names if n.startswith("__wbindgen")]
+            wbg_imports = [m for m in import_modules if m in {"wbg", "js"}]
+            if wbg_exports or wbg_imports:
+                evidence = []
+                if wbg_exports:
+                    evidence.append(f"{len(wbg_exports)} __wbindgen_* exports")
+                if wbg_imports:
+                    evidence.append(
+                        f"{len(wbg_imports)} imports from module {wbg_imports[0]}"
+                    )
+                add("wasm-bindgen", evidence, "medium")
+
+        emscripten_imports = [
+            imp
+            for imp in imports
+            if "emscripten" in str(imp.get("name", ""))
+            or "invoke_" in str(imp.get("name", ""))
+        ]
+        if emscripten_imports:
+            add(
+                "emscripten",
+                [f"{len(emscripten_imports)} emscripten-glue imports"],
+                "medium",
+            )
+
+        if any(m == "wasi_snapshot_preview1" for m in import_modules):
+            wasi_count = sum(1 for m in import_modules if m == "wasi_snapshot_preview1")
+            add(
+                "wasi-preview1",
+                [f"imports module wasi_snapshot_preview1 ({wasi_count} functions)"],
+                "high",
+            )
+
+        if "rustc" in processed_by or "Rust" in languages:
+            evidence = []
+            if "rustc" in processed_by:
+                evidence.append(f"producers.processed_by[rustc]={processed_by['rustc']}")
+            if "Rust" in languages:
+                evidence.append("producers.language[Rust]")
+            add("rustc", evidence, "high")
+        if "clang" in processed_by or languages & {"C", "C++"}:
+            evidence = []
+            if "clang" in processed_by:
+                evidence.append(f"producers.processed_by[clang]={processed_by['clang']}")
+            if languages & {"C", "C++"}:
+                evidence.append(
+                    f"producers.language[{sorted(languages & {'C', 'C++'})[0]}]"
+                )
+            add("clang", evidence, "high")
+
+        # Component WIT packages are literal versioned interface names.
+        for pkg in (component_info or {}).get("wit_packages", []):
+            version = str(pkg.get("version", ""))
+            name = f"{pkg.get('namespace', '')}:{pkg.get('package', '')}"
+            add(
+                name if not version else f"{name}@{version}",
+                [
+                    f"component {'+'.join(pkg.get('direction', []))} of interface(s) "
+                    + ", ".join(sorted(pkg.get("interfaces", [])))
+                ],
+                "high",
+            )
+
+        fastly_imports = [m for m in import_modules if m.startswith("fastly:")]
+        if fastly_imports:
+            add(
+                "fastly-compute",
+                [f"imports {sorted(set(fastly_imports))[0]}"],
+                "high",
+            )
+
+        return hints
 
     def _wasi_signals_from_imports(
         self,
@@ -929,6 +1535,12 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
             functions=function_map,
         )
 
+        js_string_builtins = sum(
+            1 for imp in imports if str(imp.get("module", "")) == "wasm:js-string"
+        )
+        if js_string_builtins:
+            signals.add("js_string_builtins")
+
         # Confidence is tied to explicit namespace signals before name heuristics.
         if {"js_namespace_import", "wasm_builtin_namespace_import"}.intersection(
             signals
@@ -947,6 +1559,7 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
             "import_count": len(js_imports),
             "export_count": len(js_exports),
             "builtin_sets": builtin_sets,
+            "js_string_builtins": js_string_builtins,
             "imports": js_imports,
             "exports": js_exports,
             "signature_surface": {
@@ -1159,6 +1772,10 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
         if any(name.startswith(".debug_") for name in custom_names):
             signals.append("debug_info_present")
 
+        # Branch hinting proposal: metadata.code.branch_hint custom section.
+        if "metadata.code.branch_hint" in custom_names:
+            signals.append("branch_hints_present")
+
         if errors:
             signals.append("parse_errors")
 
@@ -1239,6 +1856,12 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
                 if "abort" in name or name == "proc_exit":
                     capabilities.add("process.terminate")
             if module in {"wbg", "js"}:
+                capabilities.add("js.host")
+            if module == "wasm:js-string":
+                # JS String Builtins (phase 5): a reserved JS-API builtin set.
+                # The host surface is still JavaScript, so it carries the same
+                # weight as js.host.
+                capabilities.add("js-strings")
                 capabilities.add("js.host")
         return capabilities
 
@@ -1350,6 +1973,10 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
         strings_detection: dict[str, Any] | None = kwargs.get("strings_detection")
         paths_from_export: list[list[int]] = kwargs.get("paths_from_export", [])
         relaxed_opcode_counts: dict[str, int] = kwargs.get("relaxed_opcode_counts", {})
+        features_block: dict[str, Any] | None = kwargs.get("features_block")
+        obfuscation_detection: dict[str, Any] | None = kwargs.get(
+            "obfuscation_detection"
+        )
 
         findings: list[dict[str, Any]] = []
 
@@ -1516,7 +2143,257 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
                 }
             )
 
+        miner_evidence = (
+            evaluate_miner_heuristic(features_block or {}, strings_detection)
+            if features_block is not None
+            else None
+        )
+        if obfuscation_detection is not None:
+            from .obfuscation import FINDING_SCORE_THRESHOLD, STRONG_SIGNALS
+
+            signals_present = set(obfuscation_detection.get("signals", []))
+            strong = signals_present & STRONG_SIGNALS
+            score = obfuscation_detection.get("score", 0)
+            if score >= FINDING_SCORE_THRESHOLD:
+                severity = "high" if len(strong) >= 2 else "medium"
+                findings.append(
+                    {
+                        "id": "WASM-OBF-010",
+                        "title": "Obfuscation or packing signals present",
+                        "severity": severity,
+                        "confidence": "medium",
+                        "evidence": {
+                            "score": score,
+                            "signals": sorted(signals_present),
+                            "dispatcher_functions": obfuscation_detection.get(
+                                "signal_details", {}
+                            )
+                            .get("dispatcher_loop", {})
+                            .get("metric", {})
+                            .get("dispatcher_functions", [])
+                            if isinstance(
+                                obfuscation_detection.get("signal_details", {})
+                                .get("dispatcher_loop", {})
+                                .get("metric", {}),
+                                dict,
+                            )
+                            else [],
+                            "packed_segments": obfuscation_detection.get(
+                                "signal_details", {}
+                            )
+                            .get("packed_data", {})
+                            .get("metric", []),
+                            "duplicate_body_ratio": obfuscation_detection.get(
+                                "signal_details", {}
+                            )
+                            .get("duplicate_body_ratio", {})
+                            .get("metric", 0.0),
+                            "median_function_instructions": obfuscation_detection.get(
+                                "median_function_instructions"
+                            ),
+                            "exported_function_count": obfuscation_detection.get(
+                                "exported_function_count"
+                            ),
+                        },
+                        "remediation": "Review the flagged shapes against the module's expected origin; single weak signals are reported in detections.obfuscation without a finding.",
+                    }
+                )
+
+        if miner_evidence is not None:
+            findings.append(
+                {
+                    "id": "WASM-MIN-009",
+                    "title": "Compute-bound module matches the structural cryptojacking shape",
+                    "severity": "medium",
+                    "confidence": "medium"
+                    if miner_evidence.get("mining_strings")
+                    else "low",
+                    "evidence": miner_evidence,
+                    "remediation": "Triage the numeric kernels: confirm the module is an expected compute library, not a cryptominer. Numeric libraries can match this shape; string corroboration raises confidence.",
+                }
+            )
+
         return findings
+
+
+def _fair_instruction_shares(lengths: list[int], budget: int) -> list[int]:
+    """Max-min fair share of ``budget`` instructions across function lengths.
+
+    Water-filling from the shortest function: every function still in play
+    gets an equal slice of what remains, capped by its own length. Ties are
+    broken by position so results are deterministic.
+    """
+    if budget <= 0:
+        return [0] * len(lengths)
+    order = sorted(range(len(lengths)), key=lambda i: (lengths[i], i))
+    shares = [0] * len(lengths)
+    remaining = budget
+    for position, index in enumerate(order):
+        still_playing = len(lengths) - position
+        allowance = remaining // still_playing
+        kept = min(lengths[index], allowance)
+        shares[index] = kept
+        remaining -= kept
+    return shares
+
+
+def _trim_function_instructions(
+    fn: dict[str, Any], cap: int
+) -> bool:
+    """Trim one function's instruction list to ``cap`` entries, in place.
+
+    ``instruction_count`` keeps the pre-trim value so consumers can still see
+    the true body size; returns True when the function was actually trimmed.
+    """
+    instructions = fn.get("instructions")
+    if not isinstance(instructions, list) or len(instructions) <= cap:
+        return False
+    fn["instructions_kept"] = cap
+    fn["instructions_truncated"] = True
+    fn["instructions"] = instructions[:cap]
+    return True
+
+
+def _segment_entropy(data: bytes) -> float:
+    """Byte-level Shannon entropy of a data segment payload."""
+    import math
+
+    if not data:
+        return 0.0
+    counts: dict[int, int] = {}
+    for byte in data:
+        counts[byte] = counts.get(byte, 0) + 1
+    size = len(data)
+    entropy = 0.0
+    for count in counts.values():
+        probability = count / size
+        if probability:
+            entropy -= probability * math.log2(probability)
+    return round(entropy, 4)
+
+
+def _strip_instruction_streams(functions: list[dict[str, Any]]) -> None:
+    """Drop emitted instruction streams, in place, after analysis ran.
+
+    Consumers that only need metadata (SBOM generation, for example) set
+    ``include_instructions=False``: analysis, the call graph, findings, and
+    ``instruction_count`` still describe the full decode because the strip
+    happens at emission time only. Each stripped function gains
+    ``instructions_omitted: true`` so consumers can tell a stripped report
+    from an empty function.
+    """
+    for fn in functions:
+        if not isinstance(fn, dict):
+            continue
+        fn["instructions"] = []
+        fn["instructions_omitted"] = True
+
+
+def _budget_functions(
+    functions: list[dict[str, Any]],
+    budget: int | None,
+    per_function: int | None,
+    seen: set[int] | None = None,
+) -> dict[str, Any] | None:
+    """Apply an instruction budget to a list of function dicts, in place.
+
+    The per-function cap applies first, then the max-min fair budget shares
+    whatever is left across the capped lengths. ``seen`` tracks dict identity
+    so aliased entries (the same dict reachable from two lists) are counted
+    once. Returns the truncation block, or None when nothing was trimmed.
+    """
+    if seen is None:
+        seen = set()
+    unique = []
+    for fn in functions:
+        if not isinstance(fn, dict):
+            continue
+        marker = id(fn)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        unique.append(fn)
+    original_total = sum(len(fn.get("instructions") or []) for fn in unique)
+    if per_function is not None:
+        for fn in unique:
+            _trim_function_instructions(fn, per_function)
+    lengths = [len(fn.get("instructions") or []) for fn in unique]
+    total_after_cap = sum(lengths)
+    budget_hit = budget is not None and total_after_cap > budget
+    if not budget_hit and original_total == total_after_cap:
+        return None
+    truncated_functions = 0
+    if budget_hit:
+        shares = _fair_instruction_shares(lengths, budget)
+        for fn, share in zip(unique, shares):
+            if _trim_function_instructions(fn, share):
+                truncated_functions += 1
+        kept = sum(shares)
+    else:
+        # Only the per-function cap bit; count the functions it trimmed.
+        truncated_functions = sum(
+            1 for fn in unique if fn.get("instructions_truncated")
+        )
+        kept = total_after_cap
+    return {
+        "instructions": {
+            "budget": budget,
+            "per_function_cap": per_function,
+            "total_kept": kept,
+            "total_original": original_total,
+            "truncated_functions": truncated_functions,
+            "function_count": len(unique),
+        }
+    }
+
+
+def apply_instruction_budget(
+    report: dict[str, Any],
+    budget: int | None = None,
+    per_function: int | None = None,
+) -> dict[str, Any] | None:
+    """Trim instruction streams in an already-built report, in place.
+
+    Consumers holding a report built without budgets can apply the same
+    trimming the parse-time parameters would have produced. Component trees
+    are covered: top-level functions plus every nested core module's
+    functions are trimmed, and aliased function dicts (the same object
+    reachable from two lists) are counted once. Returns the truncation block
+    describing what was kept, or None when nothing was trimmed.
+    """
+    if budget is None and per_function is None:
+        return None
+    seen: set[int] = set()
+    blocks: list[dict[str, Any]] = []
+
+    def visit(node: dict[str, Any]) -> None:
+        block = _budget_functions(
+            node.get("functions") or [], budget, per_function, seen
+        )
+        if block is not None:
+            blocks.append(block)
+        for module in (node.get("component") or {}).get("core_modules", []) or []:
+            visit(module)
+        for nested in (node.get("component") or {}).get("nested_components", []) or []:
+            visit(nested)
+
+    visit(report)
+    if not blocks:
+        return None
+    instructions_blocks = [b["instructions"] for b in blocks]
+    return {
+        "instructions": {
+            "budget": budget,
+            "per_function_cap": per_function,
+            "total_kept": sum(b["total_kept"] for b in instructions_blocks),
+            "total_original": sum(b["total_original"] for b in instructions_blocks),
+            "truncated_functions": sum(
+                b["truncated_functions"] for b in instructions_blocks
+            ),
+            "function_count": sum(b["function_count"] for b in instructions_blocks),
+            "blocks": instructions_blocks,
+        }
+    }
 
 
 def _run_core_pipeline(
@@ -1525,6 +2402,12 @@ def _run_core_pipeline(
     strings_min_len: int = 5,
     include_strings: bool = True,
     include_call_graph: bool = True,
+    max_instructions_per_function: int | None = None,
+    instruction_budget: int | None = None,
+    include_instructions: bool = True,
+    include_demangled: bool = True,
+    include_features: bool = True,
+    include_cfg: bool = False,
 ) -> dict[str, Any]:
     """Run the two-pass core-module pipeline and return its full report."""
     options = ObjdumpOptions(mode=ObjdumpMode.RAW_DATA, filename=filename)
@@ -1540,6 +2423,12 @@ def _run_core_pipeline(
         strings_min_len=strings_min_len,
         include_strings=include_strings,
         include_call_graph=include_call_graph,
+        max_instructions_per_function=max_instructions_per_function,
+        instruction_budget=instruction_budget,
+        include_instructions=include_instructions,
+        include_demangled=include_demangled,
+        include_features=include_features,
+        include_cfg=include_cfg,
     )
 
 
@@ -1580,13 +2469,21 @@ def _build_component_report(
     strings_min_len: int = 5,
     include_strings: bool = True,
     include_call_graph: bool = True,
+    max_instructions_per_function: int | None = None,
+    instruction_budget: int | None = None,
+    include_instructions: bool = True,
+    include_demangled: bool = True,
+    include_features: bool = True,
+    include_cfg: bool = False,
 ) -> dict[str, Any]:
     """Build a full triage report for a component-model binary.
 
     Nested core modules are decoded with the regular core pipeline and their
     section data is aggregated at the top level (each entry tagged with
     ``core_module``), so the analysis layer and downstream consumers see one
-    combined behavior picture.
+    combined behavior picture. Instruction budgets apply per core module:
+    every nested module gets the full budget, and the per-module truncation
+    blocks are aggregated under ``truncation.instructions.core_modules``.
     """
     component = parse_component_bytes(
         data,
@@ -1595,6 +2492,12 @@ def _build_component_report(
             strings_min_len=strings_min_len,
             include_strings=include_strings,
             include_call_graph=include_call_graph,
+            max_instructions_per_function=max_instructions_per_function,
+            instruction_budget=instruction_budget,
+            include_instructions=include_instructions,
+            include_demangled=include_demangled,
+            include_features=include_features,
+            include_cfg=include_cfg,
         ),
     )
     sections = component.pop("sections", [])
@@ -1615,14 +2518,34 @@ def _build_component_report(
     # Surface component interface imports as import records so the WASI and
     # capability detections see the component's host demands.
     for entry in component.get("imports", []):
-        imports.append(
-            {
-                "module": str(entry.get("name", "")),
-                "name": "",
-                "kind": "component-" + str(entry.get("kind", "unknown")),
-                "core_module": None,
-            }
-        )
+        record = {
+            "module": str(entry.get("name", "")),
+            "name": "",
+            "kind": "component-" + str(entry.get("kind", "unknown")),
+            "core_module": None,
+        }
+        wit = parse_wit_name(str(entry.get("name", "")))
+        if wit is not None:
+            record["wit"] = wit
+            record["suggested_purl"] = suggested_wit_purl(wit)
+        attributes = entry.get("attributes") or []
+        if attributes:
+            record["attributes"] = attributes
+        imports.append(record)
+        # WASI 0.3.1 lets a plain-named import carry an `implements`
+        # attribute naming the real interface; capability detection must see
+        # the implemented interface, not just the plain name.
+        for attr in attributes:
+            implemented = str(attr.get("value", ""))
+            if attr.get("kind") == "implements" and ":" in implemented:
+                imports.append(
+                    {
+                        "module": implemented,
+                        "name": "",
+                        "kind": "component-implements",
+                        "core_module": None,
+                    }
+                )
 
     errors = list(component_errors)
     for report in component.get("core_modules", []):
@@ -1652,12 +2575,14 @@ def _build_component_report(
 
     call_graph = None
     if include_call_graph:
-        call_graph = build_call_graph(
-            functions=functions,
-            imports=imports,
-            exports=exports,
-            elements=elements,
-            start_function=None,
+        # Module-scoped merge: flattened function indices collide across core
+        # modules, so nodes carry module_id and edges carry from_module /
+        # to_module; canon lift/lower records contribute canon edges to
+        # synthetic component:type<N> nodes. Each module keeps its own
+        # reachability block.
+        call_graph = merge_component_graphs(
+            component.get("core_modules", []),
+            component.get("canon_records", []),
         )
 
     module_version = data[4] | (data[5] << 8) | (data[6] << 16) | (data[7] << 24)
@@ -1680,12 +2605,32 @@ def _build_component_report(
         memories=memories,
     )
 
+    if not include_instructions:
+        # Analysis has run; emission-time strip covers the aggregated
+        # functions and every nested core module's own list.
+        _strip_instruction_streams(functions)
+        for module_report in component.get("core_modules", []):
+            _strip_instruction_streams(module_report.get("functions", []))
+
+    wit_packages = component.get("wit_packages", [])
+    if wit_packages:
+        analysis["wit_summary"] = {
+            "package_count": len(wit_packages),
+            "imported_packages": sum(
+                1 for pkg in wit_packages if "import" in pkg["direction"]
+            ),
+            "exported_packages": sum(
+                1 for pkg in wit_packages if "export" in pkg["direction"]
+            ),
+        }
+
     toolchain = _component_toolchain(component)
 
-    return {
+    report = {
         "file": filename,
         "module_version": module_version,
         "is_component": True,
+        "report_contract": REPORT_CONTRACT,
         "section_count": len(sections),
         "sections": sections,
         "function_count": len(functions),
@@ -1712,6 +2657,35 @@ def _build_component_report(
         "analysis": analysis,
         "errors": errors,
     }
+
+    # Aggregate the per-core-module truncation blocks (each module received
+    # the full budget independently) into the component-level block.
+    module_blocks = []
+    for module_index, module_report in enumerate(component.get("core_modules", [])):
+        block = module_report.get("truncation")
+        if block:
+            entry = dict(block["instructions"])
+            entry["core_module"] = module_index
+            module_blocks.append(entry)
+    if module_blocks:
+        report["truncation"] = {
+            "instructions": {
+                "budget": instruction_budget,
+                "per_function_cap": max_instructions_per_function,
+                "total_kept": sum(b["total_kept"] for b in module_blocks),
+                "total_original": sum(
+                    b["total_original"] for b in module_blocks
+                ),
+                "truncated_functions": sum(
+                    b["truncated_functions"] for b in module_blocks
+                ),
+                "function_count": sum(
+                    b["function_count"] for b in module_blocks
+                ),
+                "core_modules": module_blocks,
+            }
+        }
+    return report
 
 
 def _component_toolchain(component: dict[str, Any]) -> dict[str, Any]:
@@ -1743,13 +2717,26 @@ def parse_wasm_bytes(
     strings_min_len: int = 5,
     include_strings: bool = True,
     include_call_graph: bool = True,
+    max_instructions_per_function: int | None = None,
+    instruction_budget: int | None = None,
+    include_instructions: bool = True,
+    include_demangled: bool = True,
+    include_features: bool = True,
+    include_cfg: bool = False,
 ) -> dict[str, Any]:
     """Parse raw wasm bytes (core module or component) into a report.
 
     ``strings_min_len`` is the extraction threshold (must reach extraction to
     be effective below the default of 5); ``include_strings`` /
     ``include_call_graph`` opt out of the derived blocks for consumers that
-    only need section data.
+    only need section data. ``max_instructions_per_function`` caps each
+    function's emitted instruction stream; ``instruction_budget`` shares a
+    total instruction budget across functions with max-min fair shares
+    (per core module for components). Both default to None, which keeps the
+    unbounded historical behavior; trimming never changes findings, the call
+    graph, or ``instruction_count``. ``include_instructions=False`` omits
+    emitted instruction streams entirely for metadata-only consumers; the
+    analysis still describes the full decode.
     """
     if detect_component(data) is not None:
         return _build_component_report(
@@ -1758,6 +2745,12 @@ def parse_wasm_bytes(
             strings_min_len=strings_min_len,
             include_strings=include_strings,
             include_call_graph=include_call_graph,
+            max_instructions_per_function=max_instructions_per_function,
+            instruction_budget=instruction_budget,
+            include_instructions=include_instructions,
+            include_demangled=include_demangled,
+            include_features=include_features,
+            include_cfg=include_cfg,
         )
     return _run_core_pipeline(
         data,
@@ -1765,6 +2758,12 @@ def parse_wasm_bytes(
         strings_min_len=strings_min_len,
         include_strings=include_strings,
         include_call_graph=include_call_graph,
+        max_instructions_per_function=max_instructions_per_function,
+        instruction_budget=instruction_budget,
+        include_instructions=include_instructions,
+        include_demangled=include_demangled,
+        include_features=include_features,
+        include_cfg=include_cfg,
     )
 
 
@@ -1773,6 +2772,12 @@ def parse_wasm_file(
     strings_min_len: int = 5,
     include_strings: bool = True,
     include_call_graph: bool = True,
+    max_instructions_per_function: int | None = None,
+    instruction_budget: int | None = None,
+    include_instructions: bool = True,
+    include_demangled: bool = True,
+    include_features: bool = True,
+    include_cfg: bool = False,
 ) -> dict[str, Any]:
     """Read and parse a wasm file path into a structured report dictionary."""
     try:
@@ -1783,6 +2788,12 @@ def parse_wasm_file(
                 strings_min_len=strings_min_len,
                 include_strings=include_strings,
                 include_call_graph=include_call_graph,
+                max_instructions_per_function=max_instructions_per_function,
+                instruction_budget=instruction_budget,
+                include_instructions=include_instructions,
+                include_demangled=include_demangled,
+                include_features=include_features,
+                include_cfg=include_cfg,
             )
     except OSError as exc:
         return {
@@ -1878,6 +2889,12 @@ def parse_wasm_bytes_json(
     strings_min_len: int = 5,
     include_strings: bool = True,
     include_call_graph: bool = True,
+    max_instructions_per_function: int | None = None,
+    instruction_budget: int | None = None,
+    include_instructions: bool = True,
+    include_demangled: bool = True,
+    include_features: bool = True,
+    include_cfg: bool = False,
 ) -> str:
     """Parse wasm bytes and serialize the structured report as JSON text."""
     report = parse_wasm_bytes(
@@ -1886,6 +2903,12 @@ def parse_wasm_bytes_json(
         strings_min_len=strings_min_len,
         include_strings=include_strings,
         include_call_graph=include_call_graph,
+        max_instructions_per_function=max_instructions_per_function,
+        instruction_budget=instruction_budget,
+        include_instructions=include_instructions,
+        include_demangled=include_demangled,
+        include_features=include_features,
+        include_cfg=include_cfg,
     )
     return json.dumps(report, ensure_ascii=False, indent=indent)
 
@@ -1896,6 +2919,12 @@ def parse_wasm_file_json(
     strings_min_len: int = 5,
     include_strings: bool = True,
     include_call_graph: bool = True,
+    max_instructions_per_function: int | None = None,
+    instruction_budget: int | None = None,
+    include_instructions: bool = True,
+    include_demangled: bool = True,
+    include_features: bool = True,
+    include_cfg: bool = False,
 ) -> str:
     """Parse a wasm file and serialize the structured report as JSON text."""
     report = parse_wasm_file(
@@ -1903,5 +2932,11 @@ def parse_wasm_file_json(
         strings_min_len=strings_min_len,
         include_strings=include_strings,
         include_call_graph=include_call_graph,
+        max_instructions_per_function=max_instructions_per_function,
+        instruction_budget=instruction_budget,
+        include_instructions=include_instructions,
+        include_demangled=include_demangled,
+        include_features=include_features,
+        include_cfg=include_cfg,
     )
     return json.dumps(report, ensure_ascii=False, indent=indent)

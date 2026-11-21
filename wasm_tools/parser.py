@@ -1,6 +1,14 @@
+import inspect
 import struct
 from typing import Any, List, Optional, Tuple
 
+from .customsections import (
+    parse_branch_hints,
+    parse_component_type,
+    parse_dylink,
+    parse_dylink_legacy,
+    parse_linking,
+)
 from .models import BinarySection
 from .opcodes import OPCODES, ImmType
 
@@ -11,10 +19,110 @@ class WasmParseError(Exception):
     pass
 
 
+_KEYWORD_SUPPORT: dict = {}
+
+
+def _accepts_keyword(method: Any, keyword: str) -> bool:
+    """Return True when a delegate callback takes ``keyword``.
+
+    Delegates written before an optional immediate existed keep their
+    positional signature; the parser only passes the new keyword to the
+    ones that declare it (or take ``**kwargs``). Results are cached per
+    underlying function.
+    """
+    func = getattr(method, "__func__", method)
+    key = (func, keyword)
+    cached = _KEYWORD_SUPPORT.get(key)
+    if cached is None:
+        try:
+            params = inspect.signature(method).parameters
+        except (TypeError, ValueError):
+            cached = False
+        else:
+            cached = keyword in params or any(
+                p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()
+            )
+        _KEYWORD_SUPPORT[key] = cached
+    return cached
+
+
 class MockOpcode:
     def __init__(self, name: str) -> None:
         """Wrap a decoded opcode name for delegate callbacks."""
         self.name = name
+
+
+def _format_const_immediate(value: Any) -> str:
+    if isinstance(value, float):
+        return f"{value:.6g}"
+    if isinstance(value, (bytes, bytearray)):
+        return "0x" + bytes(value).hex()
+    if isinstance(value, (list, tuple)):
+        return " ".join(_format_const_immediate(v) for v in value)
+    return str(value)
+
+
+class _ConstExprRecorder:
+    """Delegate that collects the instructions of one constant expression.
+
+    ``read_init_expr`` swaps it in while it runs the normal instruction
+    decoder, so the module delegate never sees constant-expression
+    instructions as part of a function body. Every ``on_opcode_*`` callback
+    records its arguments as the current instruction's immediates.
+    """
+
+    def __init__(self) -> None:
+        self.instructions: List[Tuple[str, List[Any]]] = []
+        self.closed = False
+        self.offset = 0
+        self.current_opcode: Any = None
+
+    def on_opcode(self, opcode: MockOpcode) -> None:
+        # An unknown opcode's immediates cannot be skipped, so the end of the
+        # expression (and every later entry in the section) would be lost.
+        if opcode.name.startswith("unknown_"):
+            raise WasmParseError(
+                f"Unsupported opcode {opcode.name} in constant expression"
+            )
+        self.instructions.append((opcode.name, []))
+
+    def on_end_expr(self) -> None:
+        # The decoder reports ``end`` through on_opcode first; drop it so
+        # only the expression's own instructions remain.
+        if self.instructions and self.instructions[-1][0] == "end":
+            self.instructions.pop()
+        self.closed = True
+
+    def _record(self, *args: Any, **kwargs: Any) -> None:
+        if self.instructions:
+            self.instructions[-1][1].extend(args)
+            self.instructions[-1][1].extend(kwargs.values())
+
+    def __getattr__(self, name: str) -> Any:
+        # One shared bound method, so the per-function keyword cache in
+        # _accepts_keyword holds a single entry for every callback name.
+        if not name.startswith("on_opcode_"):
+            raise AttributeError(name)
+        return self._record
+
+    def result(self) -> Tuple[str, Optional[int]]:
+        insns = self.instructions
+        if len(insns) == 1:
+            name, imms = insns[0]
+            if len(imms) == 1:
+                imm = imms[0]
+                if name in ("i32.const", "i64.const"):
+                    return f"{name[:3]}={imm}", int(imm)
+                if name in ("f32.const", "f64.const"):
+                    return f"{name[:3]}={imm:.6g}", None
+                if name in ("ref.func", "ref.null", "global.get"):
+                    return f"{name}={imm}", None
+        parts = []
+        for name, imms in insns:
+            parts.append(
+                " ".join([name] + [_format_const_immediate(v) for v in imms])
+            )
+        return " ".join(parts), None
 
 
 # Absolute heap-type byte → name (§5.2)
@@ -72,6 +180,8 @@ class BinaryReader:
         self.imported_memory_count = 0
         self.imported_global_count = 0
         self.imported_tag_count = 0
+        # End of the section being decoded; bounds constant expressions.
+        self._section_end = self.size
 
     # ─── Primitive readers ───────────────────────────────────────────────────
 
@@ -194,6 +304,21 @@ class BinaryReader:
         # GC reftype
         return self.read_reftype()
 
+    def read_blocktype(self) -> Tuple[int, Optional[str]]:
+        """Read a block type; return (signed integer, reference type or None).
+
+        A block type is 0x40 (empty), a value type, or an s33 type index.
+        Reference value types (0x63 ``ref null`` and 0x64 ``ref``) carry a
+        heap type after the prefix byte. It is consumed here so the decoder
+        stays in sync; the integer is the prefix's signed value (-29 or -28)
+        and the second element names the full type, for example
+        ``(ref null type[0])``.
+        """
+        byte = self.peek_u8()
+        if byte in (0x63, 0x64):
+            return byte - 0x80, self.read_valtype()
+        return self.read_leb128(signed=True, max_bits=33), None
+
     def read_limits(self) -> Tuple[int, Any, bool, bool, Optional[int]]:
         """Return (minimum, maximum_or_None, is_64, shared, page_size_log2_or_None).
 
@@ -222,58 +347,38 @@ class BinaryReader:
         mut = self.read_u8()
         return vt, bool(mut)
 
-    def read_init_expr(self) -> Tuple[str, Optional[int]]:
-        """Read a constant expression (ends at 0x0B).
+    def read_init_expr(
+        self, end_offset: Optional[int] = None
+    ) -> Tuple[str, Optional[int]]:
+        """Read a constant expression up to its matching 0x0B ``end``.
 
-        Returns (readable text, numeric value or None) so callers that need a
-        numeric offset (data segments) do not have to re-parse the text form.
+        The expression is decoded with the normal instruction decoder, so
+        extended-const arithmetic (``i32.add`` of two operands) and GC
+        constructors (``struct.new``, ``array.new_fixed``, ``ref.i31``) keep
+        the section in sync. Decoding stops at ``end_offset`` (the enclosing
+        section end by default) and raises when no ``end`` is found before it.
+
+        Returns (readable text, numeric value or None). A lone constant keeps
+        the short forms ``i32=7``, ``i64=7``, ``f32=1.5``, ``f64=1.5``,
+        ``ref.func=3``, ``ref.null=func`` and ``global.get=0``; any other
+        expression is its instructions in WAT order separated by spaces, for
+        example ``i32.const 1 global.get 0 i32.add``. The value is set only
+        for a lone ``i32.const`` or ``i64.const``, which data segments need
+        for their offset.
         """
-        opcode = self.read_u8()
-        if opcode == 0x41:
-            val = self.read_leb128(signed=True, max_bits=32)
-            self.read_u8()  # 0x0B end
-            return f"i32={val}", val
-        if opcode == 0x42:
-            val = self.read_leb128(signed=True, max_bits=64)
-            self.read_u8()
-            return f"i64={val}", val
-        if opcode == 0x43:
-            val = self.read_f32()
-            self.read_u8()
-            return f"f32={val:.6g}", None
-        if opcode == 0x44:
-            val = self.read_f64()
-            self.read_u8()
-            return f"f64={val:.6g}", None
-        if opcode == 0xD2:
-            idx = self.read_leb128(max_bits=32)
-            self.read_u8()
-            return f"ref.func={idx}", None
-        if opcode == 0xD0:
-            ht = self.read_heaptype()
-            self.read_u8()
-            return f"ref.null={ht}", None
-        if opcode == 0x23:
-            idx = self.read_leb128(max_bits=32)
-            self.read_u8()
-            return f"global.get={idx}", None
-        if opcode == 0xFB:
-            sub = self.read_leb128(max_bits=32)
-            # ref.i31 / struct.new_default etc. - skip remainder to 0x0B
-            # scan forward for end
-            while self.offset < self.size:
-                b = self.read_u8()
-                if b == 0x0B:
-                    break
-            return f"gc.{sub}", None
-        # Unknown: scan to 0x0B
-        parts = [f"0x{opcode:02x}"]
-        while self.offset < self.size:
-            b = self.read_u8()
-            if b == 0x0B:
-                break
-            parts.append(f"0x{b:02x}")
-        return " ".join(parts), None
+        if end_offset is None:
+            end_offset = self._section_end
+        end_offset = min(end_offset, self.size)
+        recorder = _ConstExprRecorder()
+        saved = self.delegate
+        self.delegate = recorder
+        try:
+            self.read_instructions(end_offset)
+        finally:
+            self.delegate = saved
+        if not recorder.closed or self.offset > end_offset:
+            raise WasmParseError("Constant expression is not terminated by end")
+        return recorder.result()
 
     # ─── Public entry points ─────────────────────────────────────────────────
 
@@ -302,6 +407,7 @@ class BinaryReader:
 
             self.delegate.offset = self.offset
             self.delegate.begin_section(section_index, section_id, section_size)
+            self._section_end = end_offset
 
             try:
                 self._decode_section(section_index, section_id, end_offset)
@@ -415,6 +521,60 @@ class BinaryReader:
             self.delegate.on_debug_section(
                 name, memoryview(self.data)[self.offset : end_offset]
             )
+        elif name == "metadata.code.branch_hint" and hasattr(
+            self.delegate, "on_branch_hints"
+        ):
+            # Branch hinting proposal (tool-conventions CodeMetadata.md).
+            # Full decode lives in the custom section catalog; a malformed
+            # payload degrades to an error string without costing the rest
+            # of the module.
+            info = parse_branch_hints(self.data[self.offset : end_offset])
+            if info is not None:
+                info["name"] = name
+                self.delegate.on_branch_hints(info)
+            else:
+                self.delegate.on_error(
+                    "malformed metadata.code.branch_hint custom section"
+                )
+        elif name in ("dylink.0", "dylink") and hasattr(
+            self.delegate, "on_dylink_section"
+        ):
+            # Emscripten dynamic linking ABI (tool-conventions
+            # DynamicLinking.md). The needed-libraries list is a literal
+            # dependency declaration, so a parse failure is reported but the
+            # module keeps walking.
+            payload = self.data[self.offset : end_offset]
+            info = (
+                parse_dylink(payload)
+                if name == "dylink.0"
+                else parse_dylink_legacy(payload)
+            )
+            if info is not None:
+                info["name"] = name
+                self.delegate.on_dylink_section(info)
+            else:
+                self.delegate.on_error(f"malformed {name} custom section")
+        elif name == "linking" and hasattr(self.delegate, "on_linking_section"):
+            # LLVM/lld object-file wasm (tool-conventions Linking.md): the
+            # symbol table is the only name source in object files built
+            # without a name section.
+            info = parse_linking(self.data[self.offset : end_offset])
+            if info is not None:
+                info["name"] = name
+                self.delegate.on_linking_section(info)
+            else:
+                self.delegate.on_error("malformed linking custom section")
+        elif (name == "component-type" or name.startswith("component-type:")) and hasattr(
+            self.delegate, "on_component_type_section"
+        ):
+            info = parse_component_type(self.data[self.offset : end_offset])
+            if info is not None:
+                info["name"] = name
+                self.delegate.on_component_type_section(info)
+        elif name == "core" and hasattr(self.delegate, "on_core_coredump"):
+            # Coredump convention (tool-conventions Coredump.md): presence
+            # alone is the signal; the payload is runtime-specific.
+            self.delegate.on_core_coredump()
 
     def _read_comptype(self) -> Tuple[str, List[str], List[str]]:
         """Read one subtype/composite type; return (kind, params, results).
@@ -490,61 +650,84 @@ class BinaryReader:
             self.offset = end_offset
 
     def _decode_import(self, end_offset: int) -> None:
+        """Decode the import section, including compact import groups.
+
+        The compact-imports proposal adds two grouped encodings after the
+        module name, both introduced by an empty item name: ``0x7F`` followed
+        by a vector of (name, externtype) pairs, and ``0x7E`` followed by one
+        externtype shared by a vector of names. Each item in a group is
+        reported to the delegate as an ordinary import, numbered in order.
+        """
         count = self.read_leb128(max_bits=32)
-        func_idx = 0
-        table_idx = 0
-        mem_idx = 0
-        global_idx = 0
-        tag_idx = 0
-        for i in range(count):
+        counters = {"func": 0, "table": 0, "memory": 0, "global": 0, "tag": 0}
+        import_index = 0
+
+        def emit(module: str, name: str, kind: str, extra: dict) -> None:
+            nonlocal import_index
+            if kind in counters:
+                extra["entity_index"] = counters[kind]
+                counters[kind] += 1
+            if hasattr(self.delegate, "on_import"):
+                self.delegate.on_import(import_index, module, name, kind, **extra)
+            import_index += 1
+
+        for _ in range(count):
             module = self.read_string()
             name = self.read_string()
-            kind_byte = self.read_u8()
-            kind = {0: "func", 1: "table", 2: "memory", 3: "global", 4: "tag"}.get(
-                kind_byte, "unknown"
-            )
-            extra: dict = {}
-            if kind_byte == 0:
-                extra["type_index"] = self.read_leb128(max_bits=32)
-                extra["entity_index"] = func_idx
-                func_idx += 1
-            elif kind_byte == 1:
-                extra["ref_type"] = self.read_reftype()
-                mn, mx, is64, shared, ps_log2 = self.read_limits()
-                extra["limits_min"] = mn
-                extra["limits_max"] = mx
-                extra["limits_64"] = is64
-                extra["limits_shared"] = shared
-                extra["limits_page_size_log2"] = ps_log2
-                extra["entity_index"] = table_idx
-                table_idx += 1
-            elif kind_byte == 2:
-                mn, mx, is64, shared, ps_log2 = self.read_limits()
-                extra["limits_min"] = mn
-                extra["limits_max"] = mx
-                extra["limits_64"] = is64
-                extra["limits_shared"] = shared
-                extra["limits_page_size_log2"] = ps_log2
-                extra["entity_index"] = mem_idx
-                mem_idx += 1
-            elif kind_byte == 3:
-                vt, mut = self.read_globaltype()
-                extra["valtype"] = vt
-                extra["mutable"] = mut
-                extra["entity_index"] = global_idx
-                global_idx += 1
-            elif kind_byte == 4:
-                self.read_u8()  # 0x00 attribute
-                extra["type_index"] = self.read_leb128(max_bits=32)
-                extra["entity_index"] = tag_idx
-                tag_idx += 1
-            if hasattr(self.delegate, "on_import"):
-                self.delegate.on_import(i, module, name, kind, **extra)
-        self.imported_function_count = func_idx
-        self.imported_table_count = table_idx
-        self.imported_memory_count = mem_idx
-        self.imported_global_count = global_idx
-        self.imported_tag_count = tag_idx
+            if name == "" and self.peek_u8() in (0x7E, 0x7F):
+                form = self.read_u8()
+                if form == 0x7F:
+                    n = self.read_leb128(max_bits=32)
+                    for _ in range(n):
+                        item_name = self.read_string()
+                        kind, extra = self._read_externtype()
+                        emit(module, item_name, kind, extra)
+                else:
+                    kind, extra = self._read_externtype()
+                    n = self.read_leb128(max_bits=32)
+                    for _ in range(n):
+                        emit(module, self.read_string(), kind, dict(extra))
+                continue
+            kind, extra = self._read_externtype()
+            emit(module, name, kind, extra)
+        self.imported_function_count = counters["func"]
+        self.imported_table_count = counters["table"]
+        self.imported_memory_count = counters["memory"]
+        self.imported_global_count = counters["global"]
+        self.imported_tag_count = counters["tag"]
+
+    def _read_externtype(self) -> Tuple[str, dict]:
+        """Read an import's external type; return (kind name, details)."""
+        kind_byte = self.read_u8()
+        kind = {0: "func", 1: "table", 2: "memory", 3: "global", 4: "tag"}.get(
+            kind_byte, "unknown"
+        )
+        extra: dict = {}
+        if kind_byte == 0:
+            extra["type_index"] = self.read_leb128(max_bits=32)
+        elif kind_byte == 1:
+            extra["ref_type"] = self.read_reftype()
+            mn, mx, is64, shared, ps_log2 = self.read_limits()
+            extra["limits_min"] = mn
+            extra["limits_max"] = mx
+            extra["limits_64"] = is64
+            extra["limits_shared"] = shared
+            extra["limits_page_size_log2"] = ps_log2
+        elif kind_byte == 2:
+            mn, mx, is64, shared, ps_log2 = self.read_limits()
+            extra["limits_min"] = mn
+            extra["limits_max"] = mx
+            extra["limits_64"] = is64
+            extra["limits_shared"] = shared
+            extra["limits_page_size_log2"] = ps_log2
+        elif kind_byte == 3:
+            vt, mut = self.read_globaltype()
+            extra["valtype"] = vt
+            extra["mutable"] = mut
+        elif kind_byte == 4:
+            self.read_u8()  # 0x00 attribute
+            extra["type_index"] = self.read_leb128(max_bits=32)
+        return kind, extra
 
     def _decode_function(self, end_offset: int) -> None:
         count = self.read_leb128(max_bits=32)
@@ -557,21 +740,29 @@ class BinaryReader:
         count = self.read_leb128(max_bits=32)
         for i in range(count):
             # MVP: just reftype + limits; MVP2 allows 0x40 0x00 prefix + init
-            byte = self.peek_u8()
-            if byte == 0x40:
+            # A table with an explicit initializer is 0x40 0x00 tabletype
+            # expr (function-references proposal).
+            has_init = self.peek_u8() == 0x40
+            if has_init:
                 self.read_u8()  # 0x40
-                self.read_u8()  # 0x00
+                if self.read_u8() != 0x00:
+                    raise WasmParseError("Malformed table initializer prefix")
             ref_type = self.read_reftype()
             mn, mx, is64, shared, ps_log2 = self.read_limits()
+            init_expr = self.read_init_expr()[0] if has_init else None
             if hasattr(self.delegate, "on_table"):
+                kwargs: dict = {"shared": shared, "page_size_log2": ps_log2}
+                if init_expr is not None and _accepts_keyword(
+                    self.delegate.on_table, "init_expr"
+                ):
+                    kwargs["init_expr"] = init_expr
                 self.delegate.on_table(
                     self.imported_table_count + i,
                     ref_type,
                     mn,
                     mx,
                     is64,
-                    shared=shared,
-                    page_size_log2=ps_log2,
+                    **kwargs,
                 )
 
     def _decode_memory(self, end_offset: int) -> None:
@@ -660,7 +851,7 @@ class BinaryReader:
                     self.read_init_expr()
             elif seg_type == 6:
                 table_idx = self.read_leb128(max_bits=32)
-                offset_expr = self.read_init_expr()
+                offset_expr, _ = self.read_init_expr()
                 ref_type = self.read_reftype()
                 n = self.read_leb128(max_bits=32)
                 for _ in range(n):
@@ -691,6 +882,10 @@ class BinaryReader:
             body_size = self.read_leb128(max_bits=32)
             b_end = self.offset + body_size
             func_idx = self.imported_function_count + i
+            # The body's file offset (the locals vector, just past the size
+            # field) is where DWARF low_pc and line rows point; delegates
+            # read it as an attribute, so the callback signature is unchanged.
+            self.delegate.function_body_offset = self.offset
             if hasattr(self.delegate, "begin_function_body"):
                 self.delegate.begin_function_body(func_idx, body_size)
 
@@ -786,9 +981,14 @@ class BinaryReader:
 
             elif imm_type == ImmType.BLOCK_SIG:
                 depth += 1
-                sig = self.read_leb128(signed=True, max_bits=32)
+                sig, sig_ref = self.read_blocktype()
                 if hasattr(self.delegate, "on_opcode_block_sig"):
-                    self.delegate.on_opcode_block_sig(sig)
+                    if sig_ref is not None and _accepts_keyword(
+                        self.delegate.on_opcode_block_sig, "ref_type"
+                    ):
+                        self.delegate.on_opcode_block_sig(sig, ref_type=sig_ref)
+                    else:
+                        self.delegate.on_opcode_block_sig(sig)
 
             elif imm_type == ImmType.INDEX:
                 idx = self.read_leb128(max_bits=32)
@@ -816,10 +1016,18 @@ class BinaryReader:
                     self.delegate.on_opcode_f64(val)
 
             elif imm_type == ImmType.MEMARG:
+                # Multi-memory: bit 6 of the align field signals an explicit
+                # memory index that follows (multi-memory proposal).
                 align = self.read_leb128(max_bits=32)
+                mem_idx = None
+                if align & 0x40:
+                    align &= ~0x40
+                    mem_idx = self.read_leb128(max_bits=32)
                 # memory64 extends memarg offsets from u32 to u64.
                 mem_offset = self.read_leb128(max_bits=64)
-                if hasattr(self.delegate, "on_opcode_uint32_uint32"):
+                if hasattr(self.delegate, "on_opcode_memarg"):
+                    self.delegate.on_opcode_memarg(align, mem_offset, mem_idx)
+                elif hasattr(self.delegate, "on_opcode_uint32_uint32"):
                     self.delegate.on_opcode_uint32_uint32(align, mem_offset)
 
             elif imm_type == ImmType.BR_TABLE:
@@ -905,11 +1113,26 @@ class BinaryReader:
                     self.delegate.on_opcode_index(lane)
 
             elif imm_type == ImmType.MEMARG_LANE:
+                # The lane forms carry a full memarg, so the multi-memory
+                # bit 6 applies here exactly as on plain loads and stores:
+                # align, then the memory index when the bit is set, then the
+                # offset, then the lane byte.
                 align = self.read_leb128(max_bits=32)
+                mem_idx = None
+                if align & 0x40:
+                    align &= ~0x40
+                    mem_idx = self.read_leb128(max_bits=32)
                 mem_offset = self.read_leb128(max_bits=64)
                 lane = self.read_u8()
                 if hasattr(self.delegate, "on_opcode_memarg_lane"):
-                    self.delegate.on_opcode_memarg_lane(align, mem_offset, lane)
+                    if mem_idx is not None and _accepts_keyword(
+                        self.delegate.on_opcode_memarg_lane, "mem_idx"
+                    ):
+                        self.delegate.on_opcode_memarg_lane(
+                            align, mem_offset, lane, mem_idx=mem_idx
+                        )
+                    else:
+                        self.delegate.on_opcode_memarg_lane(align, mem_offset, lane)
                 elif hasattr(self.delegate, "on_opcode_uint32_uint32"):
                     self.delegate.on_opcode_uint32_uint32(align, mem_offset)
 
@@ -925,20 +1148,35 @@ class BinaryReader:
 
             elif imm_type == ImmType.TRY_TABLE_BLOCK:
                 depth += 1
-                sig = self.read_leb128(signed=True, max_bits=32)
+                sig, sig_ref = self.read_blocktype()
                 catch_count = self.read_leb128(max_bits=32)
                 catches = []
                 for _ in range(catch_count):
                     catch_op = self.read_u8()
+                    # Catch clause kinds: 0x00 catch, 0x01 catch_ref (both
+                    # carry a tag index), 0x02 catch_all, 0x03
+                    # catch_all_ref. Anything else is malformed; reading a
+                    # label for it would desynchronise the decoder.
                     if catch_op in (0x00, 0x01):
                         tag_idx = self.read_leb128(max_bits=32)
                         lbl = self.read_leb128(max_bits=32)
                         catches.append((catch_op, tag_idx, lbl))
-                    else:
+                    elif catch_op in (0x02, 0x03):
                         lbl = self.read_leb128(max_bits=32)
                         catches.append((catch_op, lbl))
+                    else:
+                        raise WasmParseError(
+                            f"unknown try_table catch kind {catch_op:#04x}"
+                        )
                 if hasattr(self.delegate, "on_opcode_try_table"):
-                    self.delegate.on_opcode_try_table(sig, catches)
+                    if sig_ref is not None and _accepts_keyword(
+                        self.delegate.on_opcode_try_table, "ref_type"
+                    ):
+                        self.delegate.on_opcode_try_table(
+                            sig, catches, ref_type=sig_ref
+                        )
+                    else:
+                        self.delegate.on_opcode_try_table(sig, catches)
                 elif hasattr(self.delegate, "on_opcode_block_sig"):
                     self.delegate.on_opcode_block_sig(sig)
 

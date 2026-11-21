@@ -321,3 +321,230 @@ def test_component_debug_str_strings_do_not_feed_secret_screening():
     assert [f["id"] for f in report["analysis"]["findings"] if f["id"] == "WASM-STR-007"] == []
     debug_hits = [s for s in report["strings"] if s.get("source") == "custom:.debug_str"]
     assert debug_hits and debug_hits[0]["value"].startswith("https://build.example.com")
+
+
+# ─── WASI 0.3 async canon built-ins and name attributes ─────────────────────
+
+
+def _nameattributes_with_attributes(
+    name: str, attributes: list[tuple[int, str]]
+) -> bytes:
+    # nameattributes ::= 0x02 len:u32 externname vec(attribute)
+    payload = bytes([0x02]) + _name(name)
+    payload += _leb(len(attributes))
+    for kind, value in attributes:
+        payload += bytes([kind]) + _name(value)
+    return payload
+
+
+def test_component_async_canon_builtins_decode():
+    # WASI 0.3 async-era canon built-ins, in the encodings Rust wasm-tools
+    # 1.263 writes (one component per built-in, canon bytes dumped):
+    # stream.new (0x0e t), task.return (0x09 resultlist opts),
+    # thread.spawn-ref (0x40 ft, no shared byte), error-context.drop (0x1e).
+    stream_new = b"\x0e" + _leb(1)
+    task_return = b"\x09" + b"\x01\x00" + _leb(0)  # resultlist 0x01 0x00, opts []
+    spawn_ref = b"\x40" + _leb(2)
+    error_drop = b"\x1e"
+    canon = _section(8, _leb(4) + stream_new + task_return + spawn_ref + error_drop)
+    report = parse_wasm_bytes(_component([canon]), "canon03.wasm")
+
+    assert report["is_component"] is True
+    builtins = report["component"]["canonical_options"]["builtins"]
+    assert builtins == {
+        "stream.new": 1,
+        "task.return": 1,
+        "thread.spawn-ref": 1,
+        "error-context.drop": 1,
+    }
+    assert report["errors"] == []
+
+
+@pytest.mark.parametrize(
+    "entry,name",
+    [
+        (b"\x0a\x7f" + _leb(0), "context.get"),
+        (b"\x0b\x7f" + _leb(1), "context.set"),
+        (b"\x0c\x00", "thread.yield"),
+        (b"\x1f", "waitable-set.new"),
+        (b"\x20\x00" + _leb(0), "waitable-set.wait"),
+        (b"\x21\x00" + _leb(0), "waitable-set.poll"),
+        (b"\x22", "waitable-set.drop"),
+        (b"\x23", "waitable.join"),
+        (b"\x24", "backpressure.inc"),
+        (b"\x25", "backpressure.dec"),
+        (b"\x26", "thread.index"),
+        (b"\x27" + _leb(0) + _leb(0), "thread.new-indirect"),
+        (b"\x28", "thread.resume-later"),
+        (b"\x29\x00", "thread.suspend"),
+        (b"\x2a\x00", "thread.suspend-then-resume"),
+        (b"\x41" + _leb(0) + _leb(0), "thread.spawn-indirect"),
+        (b"\x42", "thread.available-parallelism"),
+    ],
+)
+def test_component_threading_and_waitable_builtins_decode(entry, name):
+    # Byte layouts from Rust wasm-tools 1.263; before they were decoded,
+    # each one abandoned the whole canon section. A trailing error-context
+    # drop proves the entry was framed to its exact length.
+    canon = _section(8, _leb(2) + entry + b"\x1e")
+    report = parse_wasm_bytes(_component([canon]), "builtin.wasm")
+    assert report["errors"] == []
+    builtins = report["component"]["canonical_options"]["builtins"]
+    assert builtins == {name: 1, "error-context.drop": 1}
+
+
+def test_component_unknown_canon_kind_still_abandons_section():
+    # A canon kind outside every decoded shape must still abandon the
+    # section (the pre-0.3 resilience contract), not raise.
+    canon = _section(8, _leb(1) + b"\xfe")
+    report = parse_wasm_bytes(_component([canon]), "canonx.wasm")
+    assert report["is_component"] is True
+    assert any("canon kind" in err for err in report["errors"])
+
+
+def test_component_name_attributes_surface_and_feed_wasi_detection():
+    # WASI 0.3.1 nameattributes: a plain-named import carrying
+    # implements "wasi:http/client@0.3.2" must reach interface and WASI
+    # detection through the attribute value.
+    imports = _section(
+        10,
+        _leb(1)
+        + _nameattributes_with_attributes("client", [(0x00, "wasi:http/client@0.3.2")])
+        + b"\x01"
+        + _leb(0),
+    )
+    report = parse_wasm_bytes(_component([imports]), "attr03.wasm")
+
+    component = report["component"]
+    entry = component["imports"][0]
+    assert entry["name"] == "client"
+    assert entry["attributes"] == [
+        {"kind": "implements", "value": "wasi:http/client@0.3.2"}
+    ]
+    assert component["interfaces"] == ["wasi:http/client@0.3.2"]
+    wasi = report["analysis"]["detections"]["wasi"]
+    assert wasi["detected"] is True
+    assert "preview3" in wasi["variants"]
+    assert "wasi:http/client@0.3.2" in wasi["import_modules"]
+
+
+def test_component_composite_valuebound_skips_cleanly():
+    # Value imports can carry composite valtypes in 0.3 binaries: the
+    # reader must skip their (length-deterministic) payloads instead of
+    # abandoning the import section.
+    # value desc: 0x02 (value), bound 0x01, 0x66 stream, 0x01 has element,
+    # 0x74 char.
+    stream_of_char = b"\x02\x01\x66\x01\x74"
+    imports = _section(10, _leb(1) + _externname("pipe") + stream_of_char)
+    report = parse_wasm_bytes(_component([imports]), "stream.wasm")
+
+    assert report["is_component"] is True
+    assert report["component"]["imports"][0]["valtype"] == "stream"
+    assert report["errors"] == []
+
+
+# ─── Module-scoped component call graph (P04) ────────────────────────────────
+
+
+def _component_with_two_core_modules() -> bytes:
+    a = _core_fixture_bytes("simple_add.wasm")
+    b = _core_fixture_bytes("call_graph.wasm")
+    return _component(
+        [
+            _section(1, a),
+            _section(1, b),
+        ]
+    )
+
+
+def test_component_graph_nodes_carry_module_ids():
+    report = parse_wasm_bytes(_component_with_two_core_modules(), "two.wasm")
+    graph = report["call_graph"]
+    module_ids = {node.get("module_id") for node in graph["nodes"]}
+    assert {0, 1}.issubset(module_ids), "both modules contribute nodes"
+    # The flattened-index collision blint inherited is now disambiguated.
+    for edge in graph["edges"]:
+        assert "from_module" in edge and "to_module" in edge
+    identity_pairs = {
+        (node.get("module_id"), node.get("index")) for node in graph["nodes"]
+    }
+    assert len(identity_pairs) == len(graph["nodes"]), "node identity is unique"
+    assert graph["component_summary"]["module_count"] == 2
+
+
+def test_component_graph_per_module_reachability():
+    report = parse_wasm_bytes(_component_with_two_core_modules(), "two.wasm")
+    per_module = report["call_graph"]["reachability"]["per_module"]
+    assert "0" in per_module and "1" in per_module
+    assert per_module["0"]["reachable_count"] > 0
+
+
+def test_canon_lift_records_create_canon_edges():
+    core = _core_fixture_bytes("simple_add.wasm")
+    # A core module, an instance of it, an alias of its "add" export as
+    # core func 0, then a canon lift of that core func into component type 3.
+    instance = _section(2, _leb(1) + b"\x00" + _leb(0) + _leb(0))
+    alias = _section(6, _leb(1) + b"\x00\x00\x01" + _leb(0) + _leb(3) + b"add")
+    canon = _section(8, _leb(1) + b"\x00\x00" + _leb(0) + _leb(0) + _leb(3))
+    report = parse_wasm_bytes(
+        _component([_section(1, core), instance, alias, canon]), "lift.wasm"
+    )
+
+    assert report["errors"] == []
+    graph = report["call_graph"]
+    canon_edges = [e for e in graph["edges"] if e["kind"] == "canon"]
+    assert len(canon_edges) == 1
+    edge = canon_edges[0]
+    # The component calls into the lifted core function.
+    assert edge["from_module"] is None and edge["from"] == 10_000_003
+    assert edge["to"] == 0 and edge["to_module"] == 0
+    assert edge["type_index"] == 3
+    synthetic = [n for n in graph["nodes"] if n.get("synthetic")]
+    assert synthetic and synthetic[0]["name"] == "component:type3"
+    assert graph["component_summary"]["canon_edge_count"] == 1
+    assert graph["edge_count"] == len(graph["edges"])
+    assert report["component"]["exported_functions"] == [
+        {"module": 0, "func": 0, "type_index": 3}
+    ]
+
+
+def test_an_unresolved_lift_adds_no_edge():
+    # A lift of a core func that is not an alias of a module export (here
+    # no alias at all) cannot be tied to a module function, so it adds no
+    # edge rather than a guessed one.
+    core = _core_fixture_bytes("simple_add.wasm")
+    canon = _section(8, _leb(1) + b"\x00\x00" + _leb(0) + _leb(0) + _leb(3))
+    report = parse_wasm_bytes(_component([_section(1, core), canon]), "lift.wasm")
+    assert [e for e in report["call_graph"]["edges"] if e["kind"] == "canon"] == []
+    assert report["component"]["exported_functions"] == [
+        {"module": None, "func": None, "type_index": 3}
+    ]
+
+
+def test_wit_component_lifts_resolve_to_the_main_module():
+    # tests/fixtures/wit_lift_lower.wasm: `wasm-tools component embed
+    # --dummy wit_lift_lower.wit` then `wasm-tools component new` (1.263).
+    # The world imports x (a canon lower) and exports run and run2, which
+    # lift the main module's exports "cm32p2||run" (func 1) and
+    # "cm32p2||run2" (func 3); module 1 is the generated fixup module.
+    report = parse_wasm_bytes(
+        _core_fixture_bytes("wit_lift_lower.wasm"), "wit_lift_lower.wasm"
+    )
+    assert report["errors"] == []
+    graph = report["call_graph"]
+    canon = sorted((e["to_module"], e["to"]) for e in graph["edges"] if e["kind"] == "canon")
+    assert canon == [(0, 1), (0, 3)]
+    assert graph["edge_count"] == len(graph["edges"])
+    reach = graph["reachability"]
+    assert reach["reachable_count"] == len(reach["reachable_functions"])
+    assert all(len(pair) == 2 for pair in reach["reachable_functions"])
+    profile = report["analysis"]["profiles"]["control_flow"]
+    assert profile["export_reachable_functions"] == reach["reachable_count"]
+
+
+def test_single_module_core_reports_have_no_module_ids():
+    report = parse_wasm_bytes(_core_fixture_bytes("simple_add.wasm"), "s.wasm")
+    for node in report["call_graph"]["nodes"]:
+        assert "module_id" not in node
+    for edge in report["call_graph"]["edges"]:
+        assert "from_module" not in edge

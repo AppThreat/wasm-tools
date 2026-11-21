@@ -1,4 +1,5 @@
 from .api import (
+    apply_instruction_budget,
     parse_wasm_bytes,
     parse_wasm_bytes_json,
     parse_wasm_file,
@@ -8,4 +9,4 @@ from .models import ObjdumpMode, ObjdumpOptions, ObjdumpState
 from .parser import BinaryReader
 from .visitor import BinaryReaderObjdumpDisassemble, BinaryReaderObjdumpPrepass
 
-__version__ = "2.1.0"
+__version__ = "2.2.0"

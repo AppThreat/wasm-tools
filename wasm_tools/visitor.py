@@ -261,12 +261,45 @@ class BinaryReaderObjdumpPrepass(BinaryReaderObjdumpBase):
     def on_target_feature(self, enabled: bool, name: str) -> None:
         self.objdump_state.target_features.append((enabled, name))
 
+    # DWARF payloads the source-mapping layer needs. Unstripped builds ship
+    # multi-megabyte DWARF, so retention stops at the documented cap.
+    _RETAINED_DEBUG_SECTIONS = (".debug_line", ".debug_line_str", ".debug_info")
+    _MAX_DWARF_RETENTION = 8 * 1024 * 1024
+
     def on_debug_section(self, name: str, payload: memoryview) -> None:
-        # Only .debug_str carries analyst-useful strings; other DWARF
-        # sections are detected by name alone. The parser hands over a
-        # zero-copy view, so copy the one payload we keep.
+        # .debug_str carries analyst-useful strings; the line-mapping layer
+        # needs .debug_line, .debug_line_str and .debug_info. The parser
+        # hands over a zero-copy view, so retained payloads are copied.
         if name == ".debug_str":
             self.objdump_state.debug_str_payload = bytes(payload)
+            return
+        if name not in type(self)._RETAINED_DEBUG_SECTIONS:
+            return
+        retained = getattr(self.objdump_state, "debug_payloads", None)
+        if retained is None:
+            retained = {}
+            self.objdump_state.debug_payloads = retained
+        # The budget covers the section being added: one oversized section
+        # is skipped (no source mapping) rather than copied in full.
+        used = sum(len(value) for value in retained.values())
+        if used + len(payload) > type(self)._MAX_DWARF_RETENTION:
+            return
+        retained[name] = bytes(payload)
+
+    def on_branch_hints(self, info: dict) -> None:
+        self.objdump_state.branch_hints = info
+
+    def on_dylink_section(self, info: dict) -> None:
+        self.objdump_state.dylink = info
+
+    def on_linking_section(self, info: dict) -> None:
+        self.objdump_state.linking = info
+
+    def on_component_type_section(self, info: dict) -> None:
+        self.objdump_state.component_type = info
+
+    def on_core_coredump(self) -> None:
+        self.objdump_state.coredump = True
 
 
 class BinaryReaderObjdumpHeaders(BinaryReaderObjdumpBase):
@@ -541,8 +574,8 @@ class BinaryReaderObjdumpDisassemble(BinaryReaderObjdumpBase):
     def on_end_expr(self) -> None:
         self._log_opcode()
 
-    def on_opcode_block_sig(self, sig: int) -> None:
-        self._log_opcode(f"sig={sig}")
+    def on_opcode_block_sig(self, sig: int, ref_type: Optional[str] = None) -> None:
+        self._log_opcode(f"sig={ref_type if ref_type is not None else sig}")
 
     def on_opcode_index(self, idx: int) -> None:
         self._log_opcode(f"{idx}")
@@ -571,8 +604,19 @@ class BinaryReaderObjdumpDisassemble(BinaryReaderObjdumpBase):
     def on_opcode_lane_idx(self, lane: int) -> None:
         self._log_opcode(f"{lane}")
 
-    def on_opcode_memarg_lane(self, align: int, mem_offset: int, lane: int) -> None:
-        self._log_opcode(f"{align} {mem_offset} lane={lane}")
+    def on_opcode_memarg(self, align: int, mem_offset: int, mem_idx=None) -> None:
+        # Multi-memory modules carry an explicit memory index; render it
+        # first to match the index order the other multi-index ops use.
+        if mem_idx is not None:
+            self._log_opcode(f"{mem_idx} {align} {mem_offset}")
+        else:
+            self._log_opcode(f"{align} {mem_offset}")
+
+    def on_opcode_memarg_lane(
+        self, align: int, mem_offset: int, lane: int, mem_idx=None
+    ) -> None:
+        prefix = f"{mem_idx} " if mem_idx is not None else ""
+        self._log_opcode(f"{prefix}{align} {mem_offset} lane={lane}")
 
     def on_opcode_v128(self, raw: bytes) -> None:
         self._log_opcode("0x" + raw.hex())
@@ -587,8 +631,116 @@ class BinaryReaderObjdumpDisassemble(BinaryReaderObjdumpBase):
     def on_opcode_br_on_cast(self, flags: int, label: int, ht1: str, ht2: str) -> None:
         self._log_opcode(f"{label} {ht1} {ht2}")
 
-    def on_opcode_try_table(self, sig: int, catches: list) -> None:
-        self._log_opcode(f"sig={sig} catches={len(catches)}")
+    def on_opcode_try_table(
+        self, sig: int, catches: list, ref_type: Optional[str] = None
+    ) -> None:
+        shown = ref_type if ref_type is not None else sig
+        self._log_opcode(f"sig={shown} catches={len(catches)}")
 
     def on_opcode_select_t(self, types: List[str]) -> None:
         self._log_opcode(f"({', '.join(types)})")
+
+
+class BinaryReaderObjdumpRaw(BinaryReaderObjdumpBase):
+    """Hexdump section payloads (objdump -s style), one 16-byte row at a time."""
+
+    def __init__(
+        self, data: bytes, options: ObjdumpOptions, state: ObjdumpState
+    ) -> None:
+        super().__init__(data, options, state)
+        self.data = data
+
+    def begin_module(self, version: int) -> None:
+        print("\nSection contents (hexdump):\n")
+
+    def _hexdump(self, payload: bytes, base_offset: int) -> None:
+        for row in range(0, len(payload), 16):
+            chunk = payload[row : row + 16]
+            hex_part = " ".join(f"{b:02x}" for b in chunk)
+            ascii_part = "".join(
+                chr(b) if 0x20 <= b <= 0x7E else "." for b in chunk
+            )
+            print(f"  {base_offset + row:06x}: {hex_part:<47}  {ascii_part}")
+
+    def begin_section(self, section_index: int, section_code: int, size: int) -> None:
+        super().begin_section(section_index, section_code, size)
+        name = SECTION_NAMES.get(section_code, f"Unknown_{section_code}")
+        if section_code == BinarySection.CUSTOM:
+            custom_name = self.objdump_state.section_names.get(
+                section_index, ""
+            )
+            name = f'Custom "{custom_name}"' if custom_name else 'Custom "?"'
+        payload_start = self.offset
+        print(f"\n{name}[{section_index}] ({size} bytes):")
+        if size <= 0:
+            return
+        payload = self.data[payload_start : payload_start + size]
+        self._hexdump(payload, payload_start)
+
+
+class SectionFilter:
+    """Wrap a delegate and forward callbacks only for the selected sections.
+
+    ``wanted_ids`` are section codes (for canonical sections) and
+    ``wanted_custom`` are custom section names; everything else is reduced to
+    no-ops so ``-x`` and ``-d`` output can be scoped without touching the
+    pinned wording of the real visitors. ``on_error`` always passes through.
+    """
+
+    # Attributes the parser assigns on its delegate; they must land on the
+    # wrapped visitor, not on this wrapper.
+    _PROXIED = {"offset", "current_opcode", "function_body_offset"}
+
+    def __init__(
+        self,
+        inner: Any,
+        wanted_ids: set[int],
+        wanted_custom: set[str],
+    ) -> None:
+        self._inner = inner
+        self._wanted_ids = wanted_ids
+        self._wanted_custom = wanted_custom
+        self._active = False
+
+    def __setattr__(self, attr: str, value: Any) -> None:
+        if attr in type(self)._PROXIED and "_inner" in self.__dict__:
+            setattr(self._inner, attr, value)
+        else:
+            object.__setattr__(self, attr, value)
+
+    def begin_section(self, section_index: int, section_code: int, size: int) -> None:
+        self._active = section_code in self._wanted_ids
+        if self._active:
+            self._inner.begin_section(section_index, section_code, size)
+
+    def begin_custom_section(
+        self, section_index: int, size: int, section_name: str
+    ) -> None:
+        self._active = section_name in self._wanted_custom
+        if self._active:
+            self._inner.begin_custom_section(section_index, size, section_name)
+
+    def begin_module(self, version: int) -> None:
+        # Module banners print regardless of the filter so the output keeps
+        # its shape.
+        self._inner.begin_module(version)
+
+    def end_module(self) -> None:
+        self._inner.end_module()
+
+    def on_error(self, message: str) -> None:
+        # Parse errors are module-level facts; they pass through regardless
+        # of the section filter.
+        self._inner.on_error(message)
+
+    def __getattr__(self, attr: str) -> Any:
+        # Reached only for names this wrapper does not define. A name the
+        # wrapped visitor lacks raises AttributeError, so the parser's
+        # hasattr checks see the same delegate surface as without the
+        # filter; callbacks outside the selected sections become no-ops,
+        # and plain attributes (the proxied reads) always pass through.
+        inner = object.__getattribute__(self, "_inner")
+        value = getattr(inner, attr)
+        if object.__getattribute__(self, "_active") or not callable(value):
+            return value
+        return lambda *args, **kwargs: None

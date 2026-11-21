@@ -15,16 +15,40 @@ wasm-tools FILE [FLAGS]
 | `--headers`           | Print the section header table with ids, names, sizes, and offsets.                                                                           |
 | `-x`, `--details`     | Print section contents: type signatures, imports, exports, globals, tables, memories, data segments, elements, tags, and code body summaries. |
 | `-d`, `--disassemble` | Decode and print function body instructions with offsets.                                                                                     |
+| `-s`, `--raw`         | Hexdump section payloads (objdump -s style). Without `--section`, dumps the data section and says so.                                          |
+| `--section NAME`      | Scope `-x`, `-d`, or `--raw` to one section: numeric id (0-13), canonical name (`code`, `memory`), or a custom section name.                   |
 | `--strings`           | Extract printable strings from data segments with linear-memory provenance.                                                                   |
 | `--strings-min-len N` | Minimum string length applied at extraction time (default 5). Affects `--strings` and `--json`.                                               |
 | `--calls FUNC`        | Print the outgoing call tree for a function selected by name or index.                                                                        |
+| `--print-wat`         | Print WAT text for the module (see [WAT.md](WAT.md)).                                                                                          |
+| `--wat-out PATH`      | Write WAT text to `PATH`.                                                                                                                      |
+| `--carve`             | Scan the input for embedded wasm blobs; see [CARVING.md](CARVING.md).                                                                          |
+| `--carve-full`        | With `--carve`, embed full parse reports per blob.                                                                                             |
+| `--carve-decode`      | With `--carve`, decode base64 runs and rescan.                                                                                                 |
+| `--extract DIR`       | With `--carve`, write bounded blobs to `DIR`.                                                                                                  |
+| `--version`           | Print the package version and exit.                                                                                                            |
 | `--no-strings`        | Skip string extraction in `--json` reports.                                                                                                   |
 | `--no-call-graph`     | Skip call graph construction in `--json` reports. Incompatible with `--calls`.                                                                |
+| `--no-instructions`   | Omit per-function instruction streams in `--json` reports; analysis still describes the full decode.                                           |
+| `--no-features`       | Skip the `analysis.features` opcode statistics block.                                                                                          |
+| `--no-demangle`       | Skip Rust/C++ demangling of name-section symbols.                                                                                             |
+| `--cfg`               | Attach per-function basic-block CFGs to `--json` reports.                                                                                      |
+| `--instruction-budget N` | Share a total instruction budget across functions (max-min fair; per core module for components).                                            |
+| `--max-instructions-per-function N` | Cap each function's emitted instruction stream.                                                                                   |
 | `--json`              | Print a minified JSON report to stdout.                                                                                                       |
 | `--json-out PATH`     | Write the same minified JSON report to `PATH`.                                                                                                |
 | `--analysis-only`     | With `--json` and/or `--json-out`, emit only the `analysis` object.                                                                           |
 
-Two combinations are rejected by the argument parser: `--analysis-only` without at least one of `--json` or `--json-out`, and `--calls` together with `--no-call-graph`.
+Multiple inputs work everywhere: repeat the file argument and add `-r DIR`
+to parse every `.wasm` under a directory. Text modes print an
+`== path ==` header per file; `--json` emits JSON Lines (one report per
+line) for multiple inputs, and `--json-out` writes a JSON array in that
+case.
+
+Rejected combinations: `--analysis-only` without at least one of `--json`
+or `--json-out`, `--calls` together with `--no-call-graph`, negative
+budget values, and a `--section` id outside 0-13. Rejections and usage
+errors exit 2; IO errors exit 1.
 
 When `--json` and `--json-out` are combined, the payload is printed to stdout and written to the file, so one parse serves both uses. Exit code is 1 with a stderr message if the file cannot be read or the output file cannot be written.
 
