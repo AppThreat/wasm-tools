@@ -83,5 +83,5 @@ Docs conventions: technical and human tone, no em-dashes, no emoji, restrained b
 ## Integration points and dependencies
 
 - No runtime third-party Python deps are required for the library itself (`dependencies = []` in `pyproject.toml`).
-- Dev/test deps are `pytest` + `pytest-cov`; pytest options are configured in `pyproject.toml`.
+- Dev/test deps are `pytest` + `pytest-cov` + `pyrefly`; pytest options and the pyrefly project roots are configured in `pyproject.toml` and `pyrefly.toml`.
 - External binary dependencies only for fixture generation (`tests/fixtures/build.py`): WABT `wat2wasm` for most fixtures, plus the Rust `wasm-tools` for the final-spec GC fixtures (`gc_rec_group.wat`, `gc_ops.wat`); WABT's text front-end cannot parse rec groups, GC instruction keywords, or abstract heap types such as `anyref`, even with `--enable-gc`.

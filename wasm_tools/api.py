@@ -262,7 +262,7 @@ class _BinaryReaderJsonCollector(BinaryReaderNop):
         """Finalize opcodes with one 64-bit float immediate."""
         self._append_immediates(val)
 
-    def on_opcode_br_table(self, targets: List[int], default: int) -> None:
+    def on_opcode_br_table(self, targets: list[int], default: int) -> None:
         """Record br_table immediates (target list then the default label)."""
         if self._pending_instruction is None:
             return
