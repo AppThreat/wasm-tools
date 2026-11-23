@@ -1,0 +1,23 @@
+pyrefly.toml
+  s_aaee579a5278f8::t_ffc50da43b5cd8 1-4
+  s_aaee579a5278f8::t_0dfe82fde36641 5-7,11
+  s_aaee579a5278f8::t_b58b97843fb98e 8-10
+AGENTS.md
+  s_aaee579a5278f8::t_af5620c139966d 86
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "adde57ab53aa40ecc4a8f8940dea27e286bcc831",
+  "prompts": {},
+  "sessions": {
+    "s_aaee579a5278f8": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "sess_5e7ef323-4862-458f-9597-0fa3f73f8197",
+        "model": "GLM-5.3"
+      },
+      "human_author": null
+    }
+  }
+}
